@@ -1,0 +1,9 @@
+**/bin/
+**/obj/
+build/tools/
+build/reference-server/
+artifacts/
+*.user
+*.pfx
+*-private.pem
+

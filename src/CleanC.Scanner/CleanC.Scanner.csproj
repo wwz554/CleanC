@@ -1,0 +1,1 @@
+<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><ProjectReference Include="../CleanC.Core/CleanC.Core.csproj"/><ProjectReference Include="../CleanC.Logging/CleanC.Logging.csproj"/><PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.31"/><PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5"/></ItemGroup></Project>

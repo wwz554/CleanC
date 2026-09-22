@@ -1,0 +1,60 @@
+name: Build and release CleanC
+on:
+  push:
+    branches: [main, development-1.6.8]
+    paths-ignore: ['updates/**', '**.md']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Restore
+        run: dotnet restore CleanC.sln
+      - name: Build
+        run: dotnet build CleanC.sln -c Release --no-restore
+      - name: Regression tests
+        run: dotnet run --project tests/CleanC.Tests -c Release --no-build
+      - name: Publish
+        run: dotnet publish src/CleanC.App/CleanC.App.csproj -c Release -p:Platform=x64 -p:WindowsAppSDKSelfContained=true -p:PublishSingleFile=false -r win-x64 --self-contained true -o artifacts/publish
+      - name: Installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y }
+          & $iscc build/CleanC.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path artifacts/publish/CleanC.pri)) { throw 'Missing WinUI resources' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CleanC-Windows-x64
+          path: artifacts/**
+          if-no-files-found: error
+      - name: Publish verified release and update manifest
+        if: github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [xml]$props = Get-Content Directory.Build.props
+          $version = $props.Project.PropertyGroup.Version
+          $tag = "v$version"
+          $file = Get-Item artifacts/installer/CleanC-Setup.exe
+          $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) { throw 'Version already released; increment Version before publishing' }
+          gh release create $tag $file.FullName --title "CleanC $version" --notes 'Windows x64 release. SHA-256 checked updates; license data retained.' --target $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) { throw 'Release upload failed' }
+          New-Item -ItemType Directory -Force updates | Out-Null
+          @{version=$version;url="https://github.com/wwz554/CleanC/releases/download/$tag/CleanC-Setup.exe";sha256=$hash;size=$file.Length;notes="CleanC $version"} | ConvertTo-Json | Set-Content -Encoding utf8NoBOM updates/latest.json
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add updates/latest.json
+          git commit -m "release: publish update manifest $version"
+          git push origin HEAD:main
+          if ($LASTEXITCODE -ne 0) { throw 'Update manifest push failed' }
