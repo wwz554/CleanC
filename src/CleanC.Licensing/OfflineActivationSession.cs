@@ -27,7 +27,12 @@ public sealed class OfflineActivationSession : IDisposable
  public bool Verify(string code,out string licenseType,out DateTimeOffset? expiresAt)
  {
   licenseType="";expiresAt=null;if(!IsValid)return false;attempts++;var entered=Normalize(code);if(entered.Length!=16||entered.Any(c=>!Alphabet.Contains(c)))return false;
-  var packed=new byte[10];int bits=0,value=0,index=0;foreach(char c in entered){value=(value<<5)|Alphabet.IndexOf(c);bits+=5;if(bits>=8){bits-=8;packed[index++]=(byte)(value>>bits);}}
+  var packed=new byte[10];int bits=0,index=0;ulong value=0;
+  foreach(char c in entered)
+  {
+   value=(value<<5)|(uint)Alphabet.IndexOf(c);bits+=5;
+   while(bits>=8){bits-=8;packed[index++]=(byte)((value>>bits)&0xFF);value=bits==0?0:value&((1UL<<bits)-1);}
+  }
   uint meta=System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(packed);
   var mac=HMACSHA256.HashData(secret,Encoding.UTF8.GetBytes("CleanC/offline/v2\n"+Request+"\n"+meta.ToString(System.Globalization.CultureInfo.InvariantCulture)));
   if(!CryptographicOperations.FixedTimeEquals(mac.AsSpan(0,6),packed.AsSpan(4,6)))return false;
