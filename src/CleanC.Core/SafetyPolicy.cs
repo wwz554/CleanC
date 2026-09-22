@@ -391,14 +391,14 @@ public sealed class SafetyPolicy
  {
   if(!Within(path,localAppData))return false;
   var normalized=path.Replace('/','\\');
-  if(normalized.Contains(@"\\local-agent-mode-sessions\\",StringComparison.OrdinalIgnoreCase)||
-     normalized.Contains(@"\\agent-mode-sessions\\",StringComparison.OrdinalIgnoreCase))return true;
-  if(normalized.Contains(@"\\Packages\\",StringComparison.OrdinalIgnoreCase)&&
-     (normalized.Contains(@"\\LocalCache\\",StringComparison.OrdinalIgnoreCase)||
-      normalized.Contains(@"\\TempState\\",StringComparison.OrdinalIgnoreCase))&&
-     (normalized.Contains(@"\\session\\",StringComparison.OrdinalIgnoreCase)||
-      normalized.Contains(@"\\sessions\\",StringComparison.OrdinalIgnoreCase)||
-      normalized.Contains(@"\\skills-plugin\\",StringComparison.OrdinalIgnoreCase)))return true;
+  if(normalized.Contains(@"\local-agent-mode-sessions\",StringComparison.OrdinalIgnoreCase)||
+     normalized.Contains(@"\agent-mode-sessions\",StringComparison.OrdinalIgnoreCase))return true;
+  if(normalized.Contains(@"\Packages\",StringComparison.OrdinalIgnoreCase)&&
+     (normalized.Contains(@"\LocalCache\",StringComparison.OrdinalIgnoreCase)||
+      normalized.Contains(@"\TempState\",StringComparison.OrdinalIgnoreCase))&&
+     (normalized.Contains(@"\session\",StringComparison.OrdinalIgnoreCase)||
+      normalized.Contains(@"\sessions\",StringComparison.OrdinalIgnoreCase)||
+      normalized.Contains(@"\skills-plugin\",StringComparison.OrdinalIgnoreCase)))return true;
   return false;
  }
 
@@ -524,3 +524,4 @@ public sealed class SafetyPolicy
   }catch(IOException){return true;}catch(UnauthorizedAccessException){return true;}
  }
 }
+
