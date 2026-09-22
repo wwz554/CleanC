@@ -1,0 +1,50 @@
+﻿CleanC 1.0.19 · Windows 10 2004+ / Windows 11 x64
+
+数据位置：
+%ProgramData%\CleanC\License\<Windows用户SID>\
+%ProgramData%\CleanC\Logs\<Windows用户SID>\
+%ProgramData%\CleanC\Recovery\<Windows用户SID>\
+%LocalAppData%\CleanC\Data\CleanC.db
+
+1.0.4 稳定性变化：
+- C 盘扫描使用 managed directory enumeration。
+- 扫描阶段不再调用 MFT/USN，也不再使用 PinnedFile/原生句柄。
+- Junction / Reparse Point 不跟随。
+- 单个目录或文件访问失败只跳过并记录日志。
+- 非正常退出后自动隔离扫描缓存数据库，授权数据不受影响。
+- 设备 CNG/TPM 密钥打开失败不再直接造成应用启动退出。
+
+崩溃日志：
+%ProgramData%\CleanC\Logs\<SID>\crash.log
+备用：%LocalAppData%\CleanC\Logs\crash-fallback.log
+
+
+1.0.19 交互变化：
+- 扫描、清理、系统检查与修复在任务开始后显示进度条，并在任务完成时到 100%。
+- 可选项和用户数据默认不选；手动勾选后会进入清理队列。受保护项目不可勾选。
+- 系统修复页面只显示结论；无法从官方输出可靠判断时会明确提示“无法可靠识别”，不会伪报成功。
+
+1.0.19 交互优化：
+- 左侧导航使用透明玻璃选中层，并在菜单之间平滑移动。
+- 页面切换使用玻璃遮罩 + 渐入，不再用“正在准备界面”整页替换。
+- 从概览或空间分析开始扫描后会进入智能清理查看进度；返回概览或空间分析时会同步显示“正在扫描…”。
+- 扫描完成后空间分析自动读取并显示最新扫描结果。
+- 智能清理分类页、空间分析目录页、系统修复页和设置页增加内存视图缓存。
+- 系统检查没有检测到明确异常时显示“系统状态良好。”
+
+
+1.0.19 永久删除与性能优化：
+- 智能清理与空间分析中的删除均为直接永久删除，不进入 Windows 回收站。
+- 1.0.19 不再为新的清理任务创建恢复副本；历史恢复区数据仍保留兼容。
+- 同目录文件批量复用目录安全锁，减少大量小文件清理时的重复系统调用。
+- 成功项不再逐文件同步写两次日志；完整报告后台保存，异常/跳过仍即时记录。
+- “永久删除”不等于多遍覆写磁盘。CleanC 不做多遍安全擦除，以避免极慢速度及 SSD 磨损/映射问题。
+
+1.0.19 受保护区域强化：
+- C:\Recovery、C:\Windows\Recovery、C:\Windows\System32\Recovery、C:\System Volume Information、%ProgramData%\Microsoft\Recovery 明确归入“系统恢复 / 受保护”。
+- 整个 %ProgramData% 默认受保护，避免破坏服务、驱动、安装器和应用共享状态。
+- AppData 中未命中明确安全缓存规则的内容默认受保护，避免破坏账户、凭据和应用状态。
+- Boot / EFI / Config.Msi / $WinREAgent / $WINDOWS.~BT / $WINDOWS.~WS / $SysReset / ESD / inetpub 等系统或服务目录受保护。
+- .ssh / .gnupg / .aws / .azure / .kube / .docker 与常见云同步目录受保护。
+- 安全策略版本升级会自动失效旧扫描缓存，首次打开本版后请重新扫描。
+

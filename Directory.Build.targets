@@ -1,0 +1,20 @@
+<Project>
+  <!--
+    Workaround for WindowsAppSDK issue #6720 (Aug 2026):
+    dotnet publish can omit the app PRI for unpackaged WinUI 3 apps.
+    Missing CleanC.pri can later fail-fast in Microsoft.UI.Xaml.dll with 0xc000027b.
+  -->
+  <Target Name="CleanC_AddProjectPriToPublish"
+          BeforeTargets="ComputeResolvedFilesToPublishList"
+          DependsOnTargets="$(GenerateProjectPriFile)"
+          Condition="'$(UseWinUI)' == 'true' and '$(WindowsPackageType)' == 'None'">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="$(ProjectPriFullPath)" />
+      <ResolvedFileToPublish Include="$(ProjectPriFullPath)"
+                             Condition="Exists('$(ProjectPriFullPath)')">
+        <RelativePath>$(ProjectPriFileName)</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
+</Project>
