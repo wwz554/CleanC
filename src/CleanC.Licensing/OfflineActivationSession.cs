@@ -44,4 +44,4 @@ public sealed class OfflineActivationSession : IDisposable
  }
  public void Dispose(){disposed=true;CryptographicOperations.ZeroMemory(secret);age.Stop();}
 }
-public sealed record OfflineActivationRecord(Lease Lease);
+public sealed record OfflineActivationRecord(Lease Lease,CleanC.Core.LicenseState? Lock=null);

@@ -40,7 +40,10 @@ public sealed partial class MainWindow : Window
    var area=DisplayArea.GetFromWindowId(AppWindow.Id,DisplayAreaFallback.Primary);
    if(area is not null)AppWindow.Resize(new SizeInt32(Math.Max(900,Math.Min((int)(1280*dpi),area.WorkArea.Width-32)),Math.Max(620,Math.Min((int)(800*dpi),area.WorkArea.Height-32))));
    else AppWindow.Resize(new SizeInt32(1280,800));
-   if(AppWindow.Presenter is OverlappedPresenter presenter){presenter.PreferredMinimumWidth=900;presenter.PreferredMinimumHeight=620;}
+   if(AppWindow.Presenter is OverlappedPresenter presenter){
+    presenter.PreferredMinimumWidth=area is null?1100:Math.Max(900,Math.Min(1100,area.WorkArea.Width-32));
+    presenter.PreferredMinimumHeight=area is null?700:Math.Max(620,Math.Min(700,area.WorkArea.Height-32));
+   }
   }
   catch(Exception e){services.Log.Write("App","WindowSizing","Fallback",detail:e.GetType().Name);try{AppWindow.Resize(new SizeInt32(1280,800));}catch{}}
   try{if(Microsoft.UI.Composition.SystemBackdrops.MicaController.IsSupported())SystemBackdrop=new MicaBackdrop();}catch(Exception e){services.Log.Write("App","Backdrop","Disabled",detail:e.GetType().Name);}
@@ -295,6 +298,9 @@ public sealed partial class MainWindow : Window
   if(databaseMaintenanceRunning){ShowDatabaseMaintenancePage("正在完成退出前数据库维护，维护结束后即可继续使用。");return;}
   if(!initialized){pageHost.Content=Ui.Stack(20,Ui.T("正在本地验证授权…",20,true));return;}
   if(services.License.Context.State!=LicenseState.Active&&!RepairBackgroundWorkRunning&&!DriverBackgroundWorkRunning){ShowActivation();return;}
+  if(activationShellBackground is not null){shell.Background=activationShellBackground;activationShellBackground=null;}
+  pageHost.VerticalContentAlignment=VerticalAlignment.Top;
+  if(pageScroll is not null){pageScroll.VerticalScrollBarVisibility=ScrollBarVisibility.Auto;pageScroll.VerticalScrollMode=ScrollMode.Auto;}
   switch(currentPage){case "clean":ShowCleanup();break;case "space":ShowSpace(vm.ScanRoot);break;case "driver":ShowDrivers();break;case "repair":ShowRepair();break;case "settings":ShowSettings();break;default:ShowOverview();break;}
  }
  void OnTimerTick()
@@ -712,33 +718,24 @@ public sealed partial class MainWindow : Window
  }
  static void OpenFolder(string path){if(!Directory.Exists(path))Directory.CreateDirectory(path);Process.Start(new ProcessStartInfo{FileName=path,UseShellExecute=true});}
  StackPanel Heading(string eyebrow,string title,string subtitle)=>Ui.Stack(8,Ui.T(eyebrow,11,true,Ui.Accent),Ui.T(title,30,true),Ui.T(subtitle,14,false,Ui.Muted));
+ Brush? activationShellBackground;
  void ShowActivation()
  {
-  var state=services.License.Context;
-  var key=new TextBox{PlaceholderText="CLC-XXXX-XXXX-XXXX-XXXX",Height=48,MaxLength=200,CornerRadius=new CornerRadius(14),FontFamily=new FontFamily("Cascadia Mono"),FontSize=15};
-  var activate=Ui.Button("在线激活",()=>{},true);activate.HorizontalAlignment=HorizontalAlignment.Stretch;
-  activate.Click+=async(_,_)=>await Guard(async()=>{activate.IsEnabled=false;try{await services.License.ActivateAsync(key.Text);key.Text="";await TransitionContentAsync(RenderPage,false,false);}finally{activate.IsEnabled=true;}});
-  var right=new ContentControl{HorizontalContentAlignment=HorizontalAlignment.Stretch};
-  var session=services.License.BeginOfflineActivation();
-  void ShowCode()
+  activationShellBackground ??= shell.Background;
+  shell.Background = Ui.B(Ui.Dark ? "131F2C" : "F4F7FB");
+  if(pageScroll is not null)
   {
-   var input=new TextBox{PlaceholderText="XXXX-XXXX-XXXX-XXXX",MaxLength=40,Height=48,FontSize=20,FontFamily=new FontFamily("Cascadia Mono"),CornerRadius=new CornerRadius(14)};
-   var submit=Ui.Button("立即激活",()=>{},true);submit.IsEnabled=false;submit.HorizontalAlignment=HorizontalAlignment.Stretch;
-   input.TextChanged+=(_,_)=>{submit.IsEnabled=OfflineActivationSession.Normalize(input.Text).Length==16&&session.IsValid;};
-   submit.Click+=async(_,_)=>await Guard(async()=>{submit.IsEnabled=false;try{await services.License.CompleteOfflineActivationAsync(input.Text);await TransitionContentAsync(RenderPage,false,false);}finally{submit.IsEnabled=session.IsValid&&OfflineActivationSession.Normalize(input.Text).Length==16;}});
-   right.Content=Ui.Stack(16,Ui.T("等待输入激活码",22,true),Ui.T("输入手机页面显示的 16 位激活码，支持整段粘贴。",13,false,Ui.Muted),input,submit,Ui.Button("返回二维码",()=>_=Guard(ShowQr)),Ui.Button("重新生成二维码",()=>_=Guard(async()=>{session=services.License.BeginOfflineActivation();await ShowQr();})));
+   pageScroll.VerticalScrollBarVisibility = ScrollBarVisibility.Disabled;
+   pageScroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
+   pageScroll.VerticalScrollMode = ScrollMode.Disabled;
+   pageScroll.ChangeView(null,0,null,true);
   }
-  async Task ShowQr()
-  {
-   using var generator=new QRCoder.QRCodeGenerator();using var data=generator.CreateQrCode(session.Url,QRCoder.QRCodeGenerator.ECCLevel.M);using var png=new QRCoder.PngByteQRCode(data);
-   using var stream=new Windows.Storage.Streams.InMemoryRandomAccessStream();using(var writer=new Windows.Storage.Streams.DataWriter(stream.GetOutputStreamAt(0))){writer.WriteBytes(png.GetGraphic(5));await writer.StoreAsync();await writer.FlushAsync();}
-   stream.Seek(0);var bitmap=new Microsoft.UI.Xaml.Media.Imaging.BitmapImage();await bitmap.SetSourceAsync(stream);
-   var qr=new Image{Source=bitmap,Width=320,Height=320,Stretch=Stretch.Uniform};
-   right.Content=Ui.Stack(12,Ui.T("内网离线激活",22,true),Ui.T("手机扫码，在公开网页输入授权码。",13,false,Ui.Muted),new Border{Background=Ui.B("FFFFFF"),Padding=new Thickness(8),CornerRadius=new CornerRadius(16),Child=qr},Ui.Button("我已扫码",ShowCode,true),Ui.Button("重新生成二维码",()=>_=Guard(async()=>{session=services.License.BeginOfflineActivation();await ShowQr();})),Ui.T("二维码 10 分钟内有效 · 按授权码原有效期激活",12,false,Ui.Muted));
-  }
-  var columns=Ui.Columns(-1,-1);Ui.Add(columns,Ui.Stack(18,Ui.Logo(56),Ui.T("授权码",22,true),Ui.T(state.StatusText,13,false,Ui.Muted),key,activate,Ui.T("联网电脑可直接输入授权码完成授权。",13,false,Ui.Muted),Ui.Button("复制设备码",CopyDevice)),0);Ui.Add(columns,right,1);
-  var card=Ui.GlassCard(Ui.Stack(24,Heading("LICENSE","激活 CleanC","直接输入授权码，或使用手机扫码完成离线激活。"),columns,Ui.T("激活码仅对当前二维码有效；重新生成后旧码立即失效。离线授权到期后，请重新扫码或联网激活。",12,false,Ui.Muted)),new Thickness(28));
-  card.MaxWidth=1000;card.HorizontalAlignment=HorizontalAlignment.Stretch;card.Margin=new Thickness(0,12,0,24);pageHost.Content=card;_=Guard(ShowQr);
+  pageHost.VerticalContentAlignment = VerticalAlignment.Stretch;
+  pageHost.Content = new ActivationPage(
+   services.License.BeginOfflineActivation,
+   async key => { await services.License.ActivateAsync(key); await TransitionContentAsync(RenderPage,false,false); },
+   async code => { await services.License.CompleteOfflineActivationAsync(code); await TransitionContentAsync(RenderPage,false,false); },
+   CopyDevice);
  }
  void CopyDevice(){var data=new Windows.ApplicationModel.DataTransfer.DataPackage();data.SetText(services.License.DeviceId);Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(data);SetStatus("设备码已复制。");}
  void ShowOverview()

@@ -132,7 +132,7 @@ public sealed partial class MainWindow
    header.ColumnDefinitions.Add(new(){Width=GridLength.Auto});header.ColumnDefinitions.Add(new(){Width=new GridLength(1,GridUnitType.Star)});header.ColumnDefinitions.Add(new(){Width=GridLength.Auto});
    var left=Ui.Row(10,Ui.Icon(DriverSummaryGlyph(state),17,color),Ui.T(title,14,true),count,Ui.T(caption,10.5,false,Ui.Muted));Ui.Add(header,left,0);
    var bulk=DriverBulkActionButton(state,devices);Ui.Add(header,bulk,2);
-   var expander=new Expander{Header=header,Content=items,IsExpanded=driverExpandedSummaries.Contains(state),HorizontalAlignment=HorizontalAlignment.Stretch};
+   var expander=new Expander{Header=header,Content=items,IsExpanded=driverExpandedSummaries.Contains(state)||state is DriverHealth.Missing or DriverHealth.Problem,HorizontalAlignment=HorizontalAlignment.Stretch};
    expander.Expanding+=(_,_)=>driverExpandedSummaries.Add(state);
    expander.Collapsed+=(_,_)=>driverExpandedSummaries.Remove(state);
    summaryExpanders[state]=expander;
@@ -149,18 +149,19 @@ public sealed partial class MainWindow
 
   var top=Ui.Row(12,scan,Ui.T($"上次扫描：{result.EndedAt.LocalDateTime:yyyy-MM-dd HH:mm:ss}",11,false,Ui.Muted));
   var root=Ui.Stack(24,
-   Heading("DRIVER HEALTH","驱动修复","保留按硬件类型分类，同时在页面底部集中显示缺失、异常和可升级驱动。"),
-   source,top,stats,
-   Ui.Stack(10,Ui.T("硬件分类",16,true),Ui.T("扫描完成后默认全部收起，需要时再展开对应硬件类别。",11,false,Ui.Muted),groups));
+   Heading("DRIVER HEALTH","驱动修复","先处理缺失与异常；仅安装与硬件匹配的 Windows Update 官方驱动。"),
+   top,stats);
+  if(!result.OfficialCheckSucceeded)root.Children.Add(Ui.T(result.OfficialCheckWarning??"官方更新检查未完成，请重新扫描。",13,true,Ui.Warning));
 
   if(summaries.Children.Count>0)
   {
    root.Children.Add(Ui.Stack(10,
     Ui.T("需要处理",16,true),
-    Ui.T("这里是问题和更新驱动的汇总视图；同一驱动仍保留在上面的原硬件分类中。点击顶部对应数字会自动跳到这里并展开。",11,false,Ui.Muted),
+    Ui.T("缺失与异常优先处理。安装后自动复检；需要重启时会保留回退备份。",11,false,Ui.Muted),
     summaries));
   }
-
+  root.Children.Add(Ui.Stack(10,Ui.T("全部硬件",16,true),Ui.T("展开分类查看当前版本、可用更新与厂商支持入口。",11,false,Ui.Muted),groups));
+  root.Children.Add(source);
   driverViewCache=root;
   pageHost.Content=driverViewCache;
  }
@@ -183,6 +184,7 @@ public sealed partial class MainWindow
       :"Windows Update 官方源未发现适用更新")
    :$"官方可用：{(string.IsNullOrWhiteSpace(device.Update.Version)?device.Update.Title:device.Update.Version)}{(device.Update.DriverDate is null?"":$" · {device.Update.DriverDate.Value.LocalDateTime:yyyy-MM-dd}")}";
   var nextBrush=device.Health switch{DriverHealth.Missing or DriverHealth.Problem=>Ui.Danger,DriverHealth.UpdateAvailable=>Ui.Warning,_=>Ui.Muted};
+  if(device.Update is null&&driverScanResult?.OfficialCheckSucceeded==false)next="官方更新未检查完成 · 本机状态："+device.ProblemText;
   var meta=Ui.Stack(3,Ui.T(device.Name,12.5,true),Ui.T(string.IsNullOrWhiteSpace(provider)?device.DeviceClass:provider,10.5,false,Ui.Muted),Ui.T(current,10.5,false,Ui.Muted),Ui.T(next,10.5,false,nextBrush));
   Ui.Add(grid,meta,1);
 
@@ -643,7 +645,7 @@ public sealed partial class MainWindow
   var devices=driverScanResult.Devices.Select(x=>x.DeviceId.Equals(updated.DeviceId,StringComparison.OrdinalIgnoreCase)?updated:x).ToList();
   var updates=devices.Count(x=>x.Update is not null);
   var problems=devices.Count(x=>x.Health is DriverHealth.Missing or DriverHealth.Problem);
-  driverScanResult=new(driverScanResult.StartedAt,DateTimeOffset.UtcNow,devices,updates,problems,driverScanResult.UnmatchedUpdateCount);
+  driverScanResult=driverScanResult with{EndedAt=DateTimeOffset.UtcNow,Devices=devices,UpdateCount=updates,ProblemCount=problems};
   driverViewCache=null;
  }
 
@@ -717,7 +719,7 @@ public sealed partial class MainWindow
   {
    driverUiInstalling=false;driverUiPercent=0;driverUiStage="正在准备驱动扫描";driverProgressView=null;driverViewCache=null;await TransitionContentAsync(()=>ShowDriverProgress(),false,true);await Task.Yield();
    using var progress=new DispatcherProgress<DriverProgress>(DispatcherQueue,p=>{driverUiPercent=p.Percent;driverUiStage=p.Stage;UpdateDriverProgress();},e=>services.Log.Write("Drivers","UiProgress","Failed",detail:e.ToString()));
-   driverScanResult=await services.Drivers.ScanAsync(progress);driverUiPercent=100;driverUiStage="扫描完成";driverExpandedCategories.Clear();driverExpandedSummaries.Clear();driverOperations.Clear();driverRollbackCandidates.Clear();driverLocalBackups.Clear();foreach(var d in driverScanResult.Devices){var b=services.Drivers.FindLatestBackup(d.DeviceId);if(b is not null){driverLocalBackups[d.DeviceId]=b;if(d.Health is DriverHealth.Missing or DriverHealth.Problem)services.Drivers.ProtectBackup(b,"全面扫描发现该设备仍异常，保留用于回退");else services.Drivers.TryReleasePendingRestartProtection(b,true,"Windows 已重启且全面扫描确认设备正常");}}SetStatus($"驱动扫描完成 · {driverScanResult.Devices.Count:N0} 个设备 · {driverScanResult.UpgradeableCount:N0} 个可升级");
+   driverScanResult=await services.Drivers.ScanAsync(progress);driverUiPercent=100;driverUiStage=driverScanResult.OfficialCheckSucceeded?"扫描完成":"本机检测完成 · 在线检查未完成";driverExpandedCategories.Clear();driverExpandedSummaries.Clear();driverOperations.Clear();driverRollbackCandidates.Clear();driverLocalBackups.Clear();foreach(var d in driverScanResult.Devices){var b=services.Drivers.FindLatestBackup(d.DeviceId);if(b is not null){driverLocalBackups[d.DeviceId]=b;if(d.Health is DriverHealth.Missing or DriverHealth.Problem)services.Drivers.ProtectBackup(b,"全面扫描发现该设备仍异常，保留用于回退");else services.Drivers.TryReleasePendingRestartProtection(b,true,"Windows 已重启且全面扫描确认设备正常");}}SetStatus(driverScanResult.OfficialCheckWarning??$"驱动扫描完成 · {driverScanResult.Devices.Count:N0} 个设备 · {driverScanResult.UpgradeableCount:N0} 个可升级");
   }
   finally
   {

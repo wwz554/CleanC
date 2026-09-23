@@ -3,7 +3,7 @@ namespace CleanC.Core;
 public sealed record CleanupRule(string Id,string Root,string Label,TimeSpan MinimumAge,string[]? Extensions=null,string? NamePrefix=null);
 public sealed class SafetyPolicy
 {
- public const string Version="2026.09.19.3";
+ public const string Version="2026.09.23.1";
  readonly string windows;
  readonly string localAppData;
  readonly string roamingAppData;
@@ -144,6 +144,7 @@ public sealed class SafetyPolicy
  public Classification ClassifyPath(string path,bool isDirectory)
  {
   var p=Path.GetFullPath(path).TrimEnd('\\');
+  if(IsPersistentAppState(p))return new(SafetyLevel.Protected,"应用持久数据","站点离线数据、会话和数据库不是可随意删除的缓存");
   if(Within(p,AppPaths.DriverBackups))return ClassifyDriverBackup(p);
   if(Within(p,AppPaths.DriverPackages))return new(SafetyLevel.Safe,"驱动安装程序","CleanC 保存的官方驱动安装包副本，可清理","cleanc-driver-package");
   if(recoveryRoots.Any(root=>Within(p,root)))return new(SafetyLevel.Protected,"系统恢复","Windows 恢复、还原点或恢复环境数据受到保护");
@@ -190,7 +191,7 @@ public sealed class SafetyPolicy
   if(File.Exists(marker))
    return new(SafetyLevel.Protected,"待回退驱动备份","该驱动升级失败、尚未确认或仍可能需要回退，暂时禁止清理");
 
-  return new(SafetyLevel.Safe,"备份的驱动","已完成升级/恢复流程的历史驱动备份，可由用户选择清理","cleanc-driver-backup");
+  return new(SafetyLevel.Optional,"备份的驱动","保留以便回退；只有确认不再需要时才手动选择清理，一键安全清理不会删除","cleanc-driver-backup");
  }
  bool IsCriticalRootItem(string path)
  {
@@ -201,9 +202,10 @@ public sealed class SafetyPolicy
  public Classification Classify(FileSnapshot f,DateTime utcNow,bool fresh=false,IDictionary<string,bool>? sessionMarkers=null)
  {
   var p=Path.GetFullPath(f.Path);var ext=Path.GetExtension(p);
+  if(IsPersistentAppState(p))return new(SafetyLevel.Protected,"应用持久数据","站点离线数据、会话和数据库不是可随意删除的缓存");
+  if((f.Attributes&(FileAttributes.ReparsePoint|FileAttributes.System|FileAttributes.Offline|FileAttributes.Encrypted))!=0||f.Links>1)return new(SafetyLevel.Protected,"受保护","链接、系统属性、云端文件或硬链接");
   if(Within(p,AppPaths.DriverBackups))return ClassifyDriverBackup(p);
   if(Within(p,AppPaths.DriverPackages))return new(SafetyLevel.Safe,"驱动安装程序","CleanC 保存的官方驱动安装包副本，可清理","cleanc-driver-package");
-  if((f.Attributes&(FileAttributes.ReparsePoint|FileAttributes.System|FileAttributes.Offline|FileAttributes.Encrypted))!=0||f.Links>1)return new(SafetyLevel.Protected,"受保护","链接、系统属性、云端文件或硬链接");
   if(recoveryRoots.Any(root=>Within(p,root)))return new(SafetyLevel.Protected,"系统恢复","Windows 恢复、还原点或恢复环境数据受到保护");
   if(TryClassifyLocalPrograms(p,false,utcNow,fresh,sessionMarkers,out var programsKind))return programsKind;
   if(protectedRoots.Any(root=>Within(p,root)))return new(SafetyLevel.Protected,"系统与应用","系统、程序、服务、凭据、云同步或应用公共数据受到保护");
@@ -215,7 +217,7 @@ public sealed class SafetyPolicy
     return new(SafetyLevel.Optional,rule.Id.Equals("Windows-ThumbnailCache",StringComparison.OrdinalIgnoreCase)?"Windows 缩略图缓存":"可重建缓存结构",
      "该文件属于会快速重新生成的缓存索引/容器；默认暂不清理，避免清理后马上再次出现",rule.Id);
    if(UserContentExtensions.Contains(ext))return new(SafetyLevel.UserData,"缓存目录中的个人文件","检测到图片、视频、文档或压缩包；即使位于缓存目录也交给用户确认",rule.Id);
-   if((!IsVolatileRule(rule.Id)&&Sensitive.Contains(ext))||PortableWithin(p,rule.Root,fresh,sessionMarkers))return new(SafetyLevel.Protected,"软件 / 项目","检测到应用、配置、项目、模型或虚拟机");
+   if(Sensitive.Contains(ext)||ExecutableStateExtensions.Contains(ext)||PortableWithin(p,rule.Root,fresh,sessionMarkers))return new(SafetyLevel.Protected,"软件 / 项目","检测到应用、配置、项目、模型或虚拟机");
    if(rule.Extensions is not null&&!rule.Extensions.Contains(ext,StringComparer.OrdinalIgnoreCase))return new(SafetyLevel.UserData,"未知临时数据","未匹配明确可清理的文件类型");
    if(rule.NamePrefix is not null&&!Path.GetFileName(p).StartsWith(rule.NamePrefix,StringComparison.OrdinalIgnoreCase))return new(SafetyLevel.UserData,"用户数据","不符合缓存名称规则");
    if(IsRecent(f,utcNow,rule.MinimumAge))
@@ -311,7 +313,7 @@ public sealed class SafetyPolicy
    return true;
   }
 
-  result=new(SafetyLevel.Safe,"卸载程序残留","未匹配当前安装记录、超过 30 天且无可运行主程序；普通残留文件可推荐清理",ruleId);
+  result=new(SafetyLevel.Optional,"疑似卸载程序残留","缺少安装记录并不能证明数据无用；请确认不再需要后手动选择，一键安全清理默认保留",ruleId);
   return true;
  }
 
@@ -410,6 +412,8 @@ public sealed class SafetyPolicy
    if(!Within(path,baseRoot))continue;
    var relative=Path.GetRelativePath(baseRoot,path);var parts=relative.Split(Path.DirectorySeparatorChar,StringSplitOptions.RemoveEmptyEntries);
    if(parts.Length<2)continue;
+   // Check every descendant before accepting a cache ancestor: a directory name is not proof of disposable data.
+   if(parts.Any(IsPersistentStateDirectory))return false;
    for(var i=1;i<parts.Length;i++)
    {
     if(parts[i].Equals("CacheStorage",StringComparison.OrdinalIgnoreCase)||parts[i].Equals("Service Worker",StringComparison.OrdinalIgnoreCase)||parts[i].Equals("IndexedDB",StringComparison.OrdinalIgnoreCase)||parts[i].Equals("Local Storage",StringComparison.OrdinalIgnoreCase)||parts[i].Equals("Session Storage",StringComparison.OrdinalIgnoreCase))return false;
@@ -419,6 +423,8 @@ public sealed class SafetyPolicy
   }
   return false;
  }
+ static bool IsPersistentStateDirectory(string part)=>part.Equals("CacheStorage",StringComparison.OrdinalIgnoreCase)||part.Equals("Service Worker",StringComparison.OrdinalIgnoreCase)||part.Equals("IndexedDB",StringComparison.OrdinalIgnoreCase)||part.Equals("Local Storage",StringComparison.OrdinalIgnoreCase)||part.Equals("Session Storage",StringComparison.OrdinalIgnoreCase);
+ bool IsPersistentAppState(string path)=>appDataRoots.Any(root=>Within(path,root))&&path.Split(new[]{'\\','/'},StringSplitOptions.RemoveEmptyEntries).Any(IsPersistentStateDirectory);
  bool TryAppDataOwner(string path,out string ownerRoot,out string ownerName)
  {
   foreach(var baseRoot in new[]{localAppData,roamingAppData,localLowAppData})

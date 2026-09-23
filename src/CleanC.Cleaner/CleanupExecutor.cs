@@ -34,20 +34,19 @@ public sealed class CleanupExecutor(ICapabilityGate gate,SafetyPolicy policy,Aud
      }
      if(directoryPinError is not null)throw new IOException("目录安全锁定失败："+directoryPinError.Message,directoryPinError);
      if(item.Classification.Safety==SafetyLevel.Protected)throw new IOException("受保护项目不能清理。");
-     var volatileCache=policy.IsVolatileRule(item.Classification.RuleId);
-     using(var pin=new PinnedFile(expected.Path,deleteAccess:!dryRun,directoryPin:directoryPin,cooperativeShare:volatileCache))
+     using(var pin=new PinnedFile(expected.Path,deleteAccess:!dryRun,directoryPin:directoryPin,cooperativeShare:false))
      {
       var current=pin.Snapshot;
       var kind=policy.Classify(current,DateTime.UtcNow,fresh:true,sessionMarkers:freshMarkers);
       if(kind.Safety==SafetyLevel.Protected||kind.Safety>item.Classification.Safety)throw new IOException("安全级别发生变化，已跳过。");
       if(item.Classification.RuleId is not null&&kind.RuleId!=item.Classification.RuleId)throw new IOException("安全规则复核未通过。");
       // Every permanent deletion, including volatile cache, must remain bound to the same Windows file.
-      // Volatile cache may legitimately change size/time while an app is running, but it may not change identity.
+      // Active or changed caches are skipped rather than deleted concurrently with their owner.
       if(expected.FileId==0||expected.Volume==0)
        throw new IOException("扫描时未取得可靠的 Windows 文件身份，已停止删除。");
       if(current.FileId!=expected.FileId||current.Volume!=expected.Volume||current.Links!=1)
        throw new IOException("文件身份已经变化，已停止删除。");
-      if(!volatileCache&&(current.Size!=expected.Size||current.LastWriteUtc!=expected.LastWriteUtc||current.CreationUtc!=expected.CreationUtc||current.Attributes!=expected.Attributes))
+      if(current.Size!=expected.Size||current.LastWriteUtc!=expected.LastWriteUtc||current.CreationUtc!=expected.CreationUtc||current.Attributes!=expected.Attributes)
        throw new IOException("文件时间、大小或属性已经变化，已停止删除。");
       gate.Demand(FeatureCapability.Cleanup);token.ThrowIfCancellationRequested();
       deletedBytes=current.Size;
@@ -83,7 +82,7 @@ public sealed class CleanupExecutor(ICapabilityGate gate,SafetyPolicy policy,Aud
   progress?.Report(new(outcomes.Count,items.Count,freed,outcomes.Count>0?ordered[Math.Min(outcomes.Count,ordered.Count)-1].File.Path:string.Empty));
   var report=new CleanupReport(started,dryRun,freed,deleted,skipped,canceled,outcomes);
   log.Write("Cleanup",dryRun?"DryRunBatch":"PermanentDeleteBatch",canceled?"Canceled":"Completed",detail:$"deleted={deleted}; skipped={skipped}; freed={freed}; recycleBin=false; recoveryCopy=false");
-  _=Task.Run(()=>WriteReport(report));
+  WriteReport(report);
   return report;
  }
  static bool IsMissingPath(Exception e)

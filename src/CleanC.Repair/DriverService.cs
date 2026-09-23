@@ -26,7 +26,7 @@ public sealed record DriverDevice(
  public string ActionText=>Health switch{DriverHealth.Missing=>"安装",DriverHealth.Problem=>"修复安装",DriverHealth.UpdateAvailable=>"升级",_=>"驱动正常"};
  public bool CanAutoInstall=>Update is not null;
 }
-public sealed record DriverScanResult(DateTimeOffset StartedAt,DateTimeOffset EndedAt,IReadOnlyList<DriverDevice> Devices,int UpdateCount,int ProblemCount,int UnmatchedUpdateCount)
+public sealed record DriverScanResult(DateTimeOffset StartedAt,DateTimeOffset EndedAt,IReadOnlyList<DriverDevice> Devices,int UpdateCount,int ProblemCount,int UnmatchedUpdateCount,bool OfficialCheckSucceeded=true,string? OfficialCheckWarning=null)
 {
  public int NormalCount=>Devices.Count(x=>x.Health==DriverHealth.Normal);
  public int MissingCount=>Devices.Count(x=>x.Health==DriverHealth.Missing);
@@ -305,11 +305,12 @@ public sealed class DriverService(ICapabilityGate gate,AuditLog log)
   var local=ReadLocalDrivers(token);
   token.ThrowIfCancellationRequested();
   progress?.Report(new(24,$"已识别 {local.Count:N0} 个硬件设备 · 正在检查官方驱动"));
-  List<DriverUpdateCandidate> updates;
+  List<DriverUpdateCandidate> updates;string? warning=null;
   try{updates=SearchOfficialDriverUpdates(token);}
   catch(Exception e)when(e is InvalidOperationException or COMException or PlatformNotSupportedException)
   {
    updates=[];log.Write("Drivers","OfficialUpdateSearch","Unavailable",detail:e.Message);
+   warning="已完成本机检测，但未能检查官方更新。请检查网络与 Windows Update 服务后重新扫描；不能据此判断驱动已是最新。";
    progress?.Report(new(58,$"已识别 {local.Count:N0} 个硬件设备 · 官方在线检查暂不可用"));
   }
   token.ThrowIfCancellationRequested();
@@ -325,8 +326,8 @@ public sealed class DriverService(ICapabilityGate gate,AuditLog log)
   }
   devices=devices.OrderBy(x=>x.Health==DriverHealth.Missing?0:x.Health==DriverHealth.Problem?1:x.Health==DriverHealth.UpdateAvailable?2:3).ThenBy(x=>x.DeviceClass,StringComparer.OrdinalIgnoreCase).ThenBy(x=>x.Name,StringComparer.OrdinalIgnoreCase).ToList();
   var updateCount=devices.Count(x=>x.Update is not null);var problemCount=devices.Count(x=>x.Health is DriverHealth.Problem or DriverHealth.Missing);var unmatched=updates.Count(x=>!used.Contains(x.UpdateId));
-  progress?.Report(new(100,$"扫描完成 · {devices.Count:N0} 个驱动 · {updateCount:N0} 个可更新"));
-  return new(started,DateTimeOffset.UtcNow,devices,updateCount,problemCount,unmatched);
+  progress?.Report(new(100,warning??$"扫描完成 · {devices.Count:N0} 个驱动 · {updateCount:N0} 个可更新"));
+  return new(started,DateTimeOffset.UtcNow,devices,updateCount,problemCount,unmatched,warning is null,warning);
  }
 
  List<RawDevice> ReadLocalDrivers(CancellationToken token)
@@ -337,7 +338,8 @@ public sealed class DriverService(ICapabilityGate gate,AuditLog log)
    if(viaPs.Count>0){log.Write("Drivers","LocalInventory","PowerShell",detail:$"{viaPs.Count} devices");return viaPs;}
    log.Write("Drivers","LocalInventory","PowerShellEmpty");
   }
-  catch(Exception e){log.Write("Drivers","LocalInventory","PowerShellFallback",detail:e.Message);}
+  catch(Exception e)when(e is not OperationCanceledException){log.Write("Drivers","LocalInventory","PowerShellFallback",detail:e.Message);}
+  token.ThrowIfCancellationRequested();
   var viaWmi=ReadLocalDriversWmi(token);
   if(viaWmi.Count>0){log.Write("Drivers","LocalInventory","WMI",detail:$"{viaWmi.Count} devices");return viaWmi;}
   throw new InvalidOperationException("没有枚举到任何 PnP 硬件。请确认 Windows Management Instrumentation (WMI) 服务正常后重试。");
@@ -456,6 +458,7 @@ $result=Get-CimInstance Win32_PnPEntity | Where-Object {
   {
    session.ClientApplicationID="CleanC Driver Repair";searcher=session.CreateUpdateSearcher();searcher.Online=true;searcher.IncludePotentiallySupersededUpdates=false;
    result=searcher.Search("IsInstalled=0 and Type='Driver' and IsHidden=0");dynamic r=result;var list=new List<DriverUpdateCandidate>();
+   if((int)r.ResultCode!=2)throw new InvalidOperationException($"官方驱动查询未完整成功（结果 {(int)r.ResultCode}），请重试。");
    for(var i=0;i<(int)r.Updates.Count;i++)
    {
     token.ThrowIfCancellationRequested();dynamic u=r.Updates.Item(i);

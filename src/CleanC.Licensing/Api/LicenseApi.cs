@@ -29,9 +29,10 @@ public sealed class LicenseApi : IDisposable
   var text=await response.Content.ReadAsStringAsync(token);
   JsonElement data;
   try{data=JsonSerializer.Deserialize<JsonElement>(text);}catch(JsonException){throw new LicenseException("SERVER_RESPONSE","授权服务器返回格式异常。");}
+  if(data.ValueKind!=JsonValueKind.Object)throw new LicenseException("SERVER_RESPONSE","授权服务器返回格式异常。");
   if(!response.IsSuccessStatusCode||!data.TryGetProperty("success",out var ok)||ok.ValueKind!=JsonValueKind.True)
   {
-   var code=data.TryGetProperty("code",out var c)?c.GetString()??"SERVER_ERROR":"SERVER_ERROR";
+   var code=data.TryGetProperty("code",out var c)&&c.ValueKind==JsonValueKind.String?c.GetString()??"SERVER_ERROR":"SERVER_ERROR";
    // Server messages are not logged or allowed to echo license keys.
    throw new LicenseException(code,ErrorText(code));
   }
@@ -43,7 +44,8 @@ public sealed class LicenseApi : IDisposable
   using var h=await http.GetAsync(new Uri(Https(options.BaseUrl),LicenseEndpoints.Health),token);h.EnsureSuccessStatusCode();
   using var m=await http.GetAsync(new Uri(Https(options.BaseUrl),LicenseEndpoints.Meta),token);m.EnsureSuccessStatusCode();
   await RefreshBootstrapAsync(verifier,token);
-  return "授权服务可达；Bootstrap 签名验证通过。";
+  using var offline=await http.GetAsync(new Uri(Https(options.BaseUrl),"offline/readiness"),token);
+  return offline.IsSuccessStatusCode?"联网授权服务可达；Bootstrap 签名验证通过；离线密钥格式检查通过，仍需扫码验收公钥配对。":"联网授权服务可达且 Bootstrap 签名验证通过；离线服务尚未就绪或未升级，请联系管理员检查离线密钥。";
  }
  public async Task RefreshBootstrapAsync(SignatureVerifier verifier,CancellationToken token)
  {
@@ -65,6 +67,8 @@ public sealed class LicenseApi : IDisposable
   "DEVICE_ALREADY_LICENSED" or "DEVICE_ALREADY_BOUND" or "DEVICE_HAS_ACTIVE_LICENSE"=>"本机已绑定有效授权，请先联系软件提供者处理。",
   "LICENSE_ALREADY_BOUND" or "DEVICE_LIMIT_REACHED"=>"授权码已绑定其他设备。",
   "RATE_LIMITED"=>"请求较频繁，请稍后再试。",
+  "OFFLINE_NOT_CONFIGURED" or "OFFLINE_KEY_INVALID"=>"服务器尚未正确配置离线授权密钥，请联系软件提供者。",
+  "OFFLINE_UNAVAILABLE"=>"离线授权服务暂时不可用，请稍后重试。",
   "CHALLENGE_INVALID" or "CHALLENGE_ALREADY_USED"=>"设备挑战已失效，请重新刷新授权。",
   _=>$"授权请求未完成（{code}）。"
  };
