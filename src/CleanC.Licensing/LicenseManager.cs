@@ -53,7 +53,7 @@ public sealed class LicenseManager
     try{await RefreshOfflineCore(token);}catch(LicenseException e)when(e.Code is "LICENSE_EXPIRED_RELEASED" or "DEVICE_NOT_BOUND"){}
    }
    Context.ForcedState=LicenseState.Activating;
-   var response=await api.Post(LicenseEndpoints.Activate,new {licenseKey=key,deviceId=device.DeviceId,devicePublicKey=device.PublicKeyPem,deviceName="Windows PC",windowsVersion=Environment.OSVersion.VersionString,appVersion="1.6.8"},token);
+   var response=await api.Post(LicenseEndpoints.Activate,new {licenseKey=key,deviceId=device.DeviceId,devicePublicKey=device.PublicKeyPem,deviceName="Windows PC",windowsVersion=Environment.OSVersion.VersionString,appVersion="1.6.9"},token);
    Accept(LicenseApi.Envelope(response),key);
   }catch{if(Context.ForcedState==LicenseState.Activating)Context.ForcedState=oldState;throw;}
   finally{mutex.Release();}
@@ -70,7 +70,7 @@ public sealed class LicenseManager
   try{
     var challenge=await api.Post("offline/challenge",new{deviceId=device.DeviceId},token);
     var nonce=challenge.GetProperty("nonce").GetString()??"";
-    var response=await api.Post("offline/refresh",new{deviceId=device.DeviceId,nonce,signature=device.Sign(nonce),appVersion="1.6.8"},token);
+    var response=await api.Post("offline/refresh",new{deviceId=device.DeviceId,nonce,signature=device.Sign(nonce),appVersion="1.6.9"},token);
     var licenseKey=response.TryGetProperty("licenseKey",out var keyElement)?keyElement.GetString():null;
     if(string.IsNullOrWhiteSpace(licenseKey))throw new LicenseException("INVALID_REFRESH","服务器未返回绑定授权信息。");
     Accept(LicenseApi.Envelope(response),licenseKey);
@@ -92,7 +92,7 @@ public sealed class LicenseManager
   try {
    var challenge=await api.Post(LicenseEndpoints.Challenge,new {licenseKey=saved.LicenseKey,deviceId=device.DeviceId},token);
    var nonce=challenge.GetProperty("nonce").GetString()??"";
-   var response=await api.Post(LicenseEndpoints.Refresh,new{licenseKey=saved.LicenseKey,deviceId=device.DeviceId,nonce,signature=device.Sign(nonce),windowsVersion=Environment.OSVersion.VersionString,appVersion="1.6.8"},token);
+   var response=await api.Post(LicenseEndpoints.Refresh,new{licenseKey=saved.LicenseKey,deviceId=device.DeviceId,nonce,signature=device.Sign(nonce),windowsVersion=Environment.OSVersion.VersionString,appVersion="1.6.9"},token);
    Accept(LicenseApi.Envelope(response),saved.LicenseKey);
   }catch(LicenseException e) {
    LastError=e.Message; failures++;ScheduleRetry();

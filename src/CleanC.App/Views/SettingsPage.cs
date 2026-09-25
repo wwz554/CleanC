@@ -36,8 +36,8 @@ public sealed partial class MainWindow
 
   var logs=Ui.Stack(12,Ui.T("日志与报告",20,true),Ui.Row(12,Ui.Button("查看最近日志",()=>_=Guard(async()=>{SetStatus("正在读取本地日志…");var text=await Task.Run(()=>services.Log.ReadRecent());if(currentPage!="settings")return;var box=new TextBox{Text=text,IsReadOnly=true,AcceptsReturn=true,TextWrapping=TextWrapping.Wrap,FontFamily=new FontFamily("Cascadia Mono"),FontSize=11,Height=360,Width=700};var d=new ContentDialog{XamlRoot=shell.XamlRoot,Title="本地日志",Content=box,CloseButtonText="关闭"};await ShowDialogAsync(d);})),Ui.Button("打开日志目录",()=>OpenFolder(services.Log.DirectoryPath))));
   var logo=new Image{Source=new BitmapImage(new Uri(Path.Combine(AppContext.BaseDirectory,"Assets","CleanC-logo.png"))),Height=160,Stretch=Stretch.Uniform,HorizontalAlignment=HorizontalAlignment.Left};
-  var about=Ui.Stack(16,logo,Ui.T("CleanC  1.6.8",20,true),Ui.T("只清理能够确认安全的数据。",14),Ui.T("无广告、无后台驻留、不上传用户文件、不做遥测。\n仅授权请求发送授权码、设备公钥、设备标识与软件版本。\nCopyright © 2026 CleanC",12,false,Ui.Muted));
-  settingsViewCache=Ui.Stack(24,Heading("MAKE IT YOURS","设置","外观、扫描偏好和授权信息。"),Ui.Card(Ui.Stack(20,Ui.T("外观与性能",20,true),theme,quiet)),Ui.Card(license),Ui.Card(recovery),Ui.Card(logs),Ui.Card(Ui.Stack(12,Ui.T("软件更新",20,true),Ui.T("当前版本 1.6.8 · 从 GitHub 官方项目获取更新",13,false,Ui.Muted),Ui.Button("检查更新",()=>_=CheckForUpdatesAsync(),true))),Ui.Card(about));
+  var about=Ui.Stack(16,logo,Ui.T("CleanC  1.6.9",20,true),Ui.T("只清理能够确认安全的数据。",14),Ui.T("无广告、无后台驻留、不上传用户文件、不做遥测。\n仅授权请求发送授权码、设备公钥、设备标识与软件版本。\nCopyright © 2026 CleanC",12,false,Ui.Muted));
+  settingsViewCache=Ui.Stack(24,Heading("MAKE IT YOURS","设置","外观、扫描偏好和授权信息。"),Ui.Card(Ui.Stack(20,Ui.T("外观与性能",20,true),theme,quiet)),Ui.Card(license),Ui.Card(recovery),Ui.Card(logs),Ui.Card(Ui.Stack(12,Ui.T("软件更新",20,true),Ui.T("当前版本 1.6.9 · 从 GitHub 官方项目获取更新",13,false,Ui.Muted),Ui.Button("检查更新",()=>_=CheckForUpdatesAsync(),true))),Ui.Card(about));
   pageHost.Content=settingsViewCache;
  }
 }

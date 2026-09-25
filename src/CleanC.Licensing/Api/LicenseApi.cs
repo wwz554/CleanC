@@ -19,7 +19,7 @@ public sealed class LicenseApi : IDisposable
  {
   this.options=options;
   http=handler is null?new HttpClient(new SocketsHttpHandler{AllowAutoRedirect=false,ConnectTimeout=TimeSpan.FromSeconds(8)}):new HttpClient(handler);
-  http.Timeout=TimeSpan.FromSeconds(20);http.MaxResponseContentBufferSize=128*1024;http.DefaultRequestHeaders.UserAgent.ParseAdd("CleanC/1.6.8");
+  http.Timeout=TimeSpan.FromSeconds(20);http.MaxResponseContentBufferSize=128*1024;http.DefaultRequestHeaders.UserAgent.ParseAdd("CleanC/1.6.9");
  }
  static Uri Https(string value){if(!Uri.TryCreate(value,UriKind.Absolute,out var uri)||uri.Scheme!="https"||!string.IsNullOrEmpty(uri.UserInfo))throw new LicenseException("API_NOT_CONFIGURED","授权服务尚未配置有效 HTTPS 地址。");return uri;}
  public async Task<JsonElement> Post(string endpoint,object body,CancellationToken token)
