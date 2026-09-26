@@ -27,8 +27,12 @@ public sealed class LicenseManager
     offline=store.Read<OfflineActivationRecord>("offline-license.dat");
     if(offline is null)return;
     var lease=offline.Lease;
-    if(lease.DeviceId!=device.DeviceId||lease.RenewalProtocol!="offline-v2"||lease.ExpiresAt!=(lease.LicenseExpiresAt??DateTimeOffset.MaxValue)||lease.IsPermanent!=(lease.LicenseType=="permanent"))throw new CryptographicException("离线记录无效。");
-    Context.Lease=lease;Context.ForcedState=offline.Lock;time.Restore(lease,store.Read<TrustedTimeState>("trusted-time.dat"));return;
+    if(lease.DeviceId!=device.DeviceId)throw new LicenseException("DEVICE_MISMATCH","离线授权与当前设备不匹配。");
+    if(lease.RenewalProtocol!="offline-v2"||lease.ExpiresAt!=(lease.LicenseExpiresAt??DateTimeOffset.MaxValue)||lease.IsPermanent!=(lease.LicenseType=="permanent"))throw new CryptographicException("离线记录无效。");
+    Context.Lease=lease;Context.ForcedState=offline.Lock;time.Restore(lease,store.Read<TrustedTimeState>("trusted-time.dat"));
+    log.Write("Licensing","OfflineLocalValidation",Context.State.ToString(),detail:"offline-v2; checkpoint restored");
+    if(Context.State==LicenseState.ClockRollbackSuspected)await TryRecoverOfflineTimeAsync(token);
+    return;
    }
    Context.Lease=verifier.VerifyLease(saved.Envelope,device.DeviceId);Context.ForcedState=saved.Lock;
    time.Restore(Context.Lease,store.Read<TrustedTimeState>("trusted-time.dat"));
@@ -53,7 +57,7 @@ public sealed class LicenseManager
     try{await RefreshOfflineCore(token);}catch(LicenseException e)when(e.Code is "LICENSE_EXPIRED_RELEASED" or "DEVICE_NOT_BOUND"){}
    }
    Context.ForcedState=LicenseState.Activating;
-   var response=await api.Post(LicenseEndpoints.Activate,new {licenseKey=key,deviceId=device.DeviceId,devicePublicKey=device.PublicKeyPem,deviceName="Windows PC",windowsVersion=Environment.OSVersion.VersionString,appVersion="1.7.0"},token);
+   var response=await api.Post(LicenseEndpoints.Activate,new {licenseKey=key,deviceId=device.DeviceId,devicePublicKey=device.PublicKeyPem,deviceName="Windows PC",windowsVersion=Environment.OSVersion.VersionString,appVersion="1.7.1"},token);
    Accept(LicenseApi.Envelope(response),key);
   }catch{if(Context.ForcedState==LicenseState.Activating)Context.ForcedState=oldState;throw;}
   finally{mutex.Release();}
@@ -70,7 +74,7 @@ public sealed class LicenseManager
   try{
     var challenge=await api.Post("offline/challenge",new{deviceId=device.DeviceId},token);
     var nonce=challenge.GetProperty("nonce").GetString()??"";
-    var response=await api.Post("offline/refresh",new{deviceId=device.DeviceId,nonce,signature=device.Sign(nonce),appVersion="1.7.0"},token);
+    var response=await api.Post("offline/refresh",new{deviceId=device.DeviceId,nonce,signature=device.Sign(nonce),appVersion="1.7.1"},token);
     var licenseKey=response.TryGetProperty("licenseKey",out var keyElement)?keyElement.GetString():null;
     if(string.IsNullOrWhiteSpace(licenseKey))throw new LicenseException("INVALID_REFRESH","服务器未返回绑定授权信息。");
     Accept(LicenseApi.Envelope(response),licenseKey);
@@ -92,7 +96,7 @@ public sealed class LicenseManager
   try {
    var challenge=await api.Post(LicenseEndpoints.Challenge,new {licenseKey=saved.LicenseKey,deviceId=device.DeviceId},token);
    var nonce=challenge.GetProperty("nonce").GetString()??"";
-   var response=await api.Post(LicenseEndpoints.Refresh,new{licenseKey=saved.LicenseKey,deviceId=device.DeviceId,nonce,signature=device.Sign(nonce),windowsVersion=Environment.OSVersion.VersionString,appVersion="1.7.0"},token);
+   var response=await api.Post(LicenseEndpoints.Refresh,new{licenseKey=saved.LicenseKey,deviceId=device.DeviceId,nonce,signature=device.Sign(nonce),windowsVersion=Environment.OSVersion.VersionString,appVersion="1.7.1"},token);
    Accept(LicenseApi.Envelope(response),saved.LicenseKey);
   }catch(LicenseException e) {
    LastError=e.Message; failures++;ScheduleRetry();
@@ -114,7 +118,9 @@ public sealed class LicenseManager
  void Accept(SignedEnvelope envelope,string key)
  {
   var lease=verifier.VerifyLease(envelope,device.DeviceId);
-  if(Context.Lease is {} previous&&lease.ServerTime<previous.ServerTime)throw new LicenseException("INVALID_LEASE","服务器返回了过旧的租约。");
+  // offline-v2's ServerTime was supplied by the local clock, not signed by the
+  // server. Do not let a fast local clock permanently prevent signed recovery.
+  if(Context.Lease is {RenewalProtocol:not "offline-v2"} previous&&lease.ServerTime<previous.ServerTime)throw new LicenseException("INVALID_LEASE","服务器返回了过旧的租约。");
   var first=saved?.LicenseKey==key?saved.FirstAcceptedUtc:lease.ServerTime;
   var next=new SavedLicense(key,envelope,first);
   var newTime=new TrustedTimeService(clock);newTime.Accept(lease);
@@ -132,10 +138,27 @@ public sealed class LicenseManager
   var margin=TimeSpan.FromMinutes(Math.Min(15,(l.ExpiresAt-l.ServerTime).TotalMinutes/10));
   return time.RollbackSuspected||time.Now>=l.ExpiresAt-margin;
  }
+ async Task TryRecoverOfflineTimeAsync(CancellationToken token=default)
+ {
+  // Keep the original DPAPI record and device identity. Only a verified server
+  // lease may repair uncertain time; network failure is NOT a signature failure.
+  try{await RefreshAsync(token);}
+  catch(Exception e)when(e is LicenseException or HttpRequestException or TaskCanceledException or IOException)
+  {
+   LastError=Context.State==LicenseState.ClockRollbackSuspected
+    ?"原离线授权已保留，但时间校验未通过；请校准 Windows 日期时间并联网验证，无需删除授权或更换设备码。"
+    :Context.StatusText;
+   failures++;ScheduleRetry();log.Write("Licensing","OfflineTimeRecovery","Deferred",detail:e is LicenseException le?le.Code:e.GetType().Name);
+  }
+ }
  public async Task TickAsync()
  {
   if(IsBusy)return;
-  if(saved is null){if(offline is not null&&time.Initialized&&clock.Uptime-lastCheckpoint>=TimeSpan.FromMinutes(2)){Checkpoint();lastCheckpoint=clock.Uptime;}return;}
+  if(saved is null){
+   if(offline is not null&&Context.State==LicenseState.ClockRollbackSuspected&&clock.Uptime>=nextRetry)await TryRecoverOfflineTimeAsync();
+   if(offline is not null&&time.Initialized&&clock.Uptime-lastCheckpoint>=TimeSpan.FromMinutes(2)){Checkpoint();lastCheckpoint=clock.Uptime;}
+   return;
+  }
   if(time.Initialized&&clock.Uptime-lastCheckpoint>=TimeSpan.FromMinutes(2)){Checkpoint();lastCheckpoint=clock.Uptime;}
   bool expired=Context.State==LicenseState.Expired&&!expiryAttempted&&Context.ForcedState is null;
   if(expired){expiryAttempted=true;await RefreshAsync();}

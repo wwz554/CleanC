@@ -11,6 +11,8 @@ internal sealed class ActivationPage : Grid
     readonly Func<OfflineActivationSession> createSession;
     readonly Func<string, Task> onlineActivate, offlineActivate;
     readonly Action copyDevice;
+    readonly string? validationMessage;
+    readonly Func<Task>? validateExisting;
     readonly ContentControl host = new() { HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch };
     readonly Viewbox fit = new() { Stretch = Stretch.Uniform, StretchDirection = StretchDirection.DownOnly };
     readonly DispatcherTimer expiryTimer = new() { Interval = TimeSpan.FromSeconds(1) };
@@ -25,10 +27,11 @@ internal sealed class ActivationPage : Grid
     string screen = "landing";
 
     public ActivationPage(Func<OfflineActivationSession> createSession, Func<string, Task> onlineActivate,
-        Func<string, Task> offlineActivate, Action copyDevice)
+        Func<string, Task> offlineActivate, Action copyDevice, string? validationMessage=null, Func<Task>? validateExisting=null)
     {
         this.createSession = createSession; this.onlineActivate = onlineActivate;
         this.offlineActivate = offlineActivate; this.copyDevice = copyDevice;
+        this.validationMessage=validationMessage;this.validateExisting=validateExisting;
         session = createSession();
         fit.Child = host;
         fit.HorizontalAlignment = HorizontalAlignment.Center;
@@ -94,6 +97,10 @@ internal sealed class ActivationPage : Grid
             key.KeyDown += (_, e) => { if(e.Key == Windows.System.VirtualKey.Enter && activate.IsEnabled) _ = Run(() => onlineActivate(key.Text)); };
             var left = Ui.Stack(16, Text("电脑联网激活",18,true), Text("输入授权码，完成本机授权。",13,false,true),
                 key, activate, Link("复制设备码",copyDevice));
+            if(!string.IsNullOrWhiteSpace(validationMessage)){
+                left.Children.Add(Text(validationMessage,12,false,true));
+                if(validateExisting is not null)left.Children.Add(Button("验证已有授权（无需重新输入）",()=>_=Run(validateExisting)));
+            }
             left.MaxWidth = 308; left.HorizontalAlignment = HorizontalAlignment.Stretch; left.VerticalAlignment = VerticalAlignment.Center;
             var galaxy = new ConstellationQrCard(session.Url) { Width = 350, Height = 350 };
             var actions = new Grid { ColumnSpacing = 7 };

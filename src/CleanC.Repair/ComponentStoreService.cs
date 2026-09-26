@@ -54,6 +54,7 @@ public sealed class ComponentStoreService
   {
    // Never trust the stale UI report when making a servicing decision.
    if(host.RestartPending!=false)return Finish(new(false,true,3010,"Windows 待重启，或无法确认待重启状态。请重启后重新分析；本次未执行组件清理。",null));
+   progress?.Report(new(-1,"清理前复核 Windows 组件状态"));
    var before=await AnalyzeCore(progress).ConfigureAwait(false);
    if(!before.Available)return Finish(new(false,false,before.ExitCode,before.Message,before));
    if(!before.CleanupRecommended||before.ReclaimablePackages==0)
@@ -66,6 +67,7 @@ public sealed class ComponentStoreService
    if(result.ExitCode==3010||result.ExitCode==1641||host.RestartPending!=false)
     return Finish(new(false,true,result.ExitCode,"Windows 要求重启或重启状态未确认；请重启后重新分析，不将本次标记为最终清理完成。",null));
    if(result.ExitCode!=0)return Finish(new(false,false,result.ExitCode,$"Windows 组件清理失败（错误码 {result.ExitCode}）；未将组件存储全部大小计为释放量。",null));
+   progress?.Report(new(-1,"清理命令已结束，正在验证结果（尚未完成）"));
    var after=await AnalyzeCore(progress).ConfigureAwait(false);
    return Finish(new(after.Available,false,0,after.Available
     ?$"Windows 组件清理已完成并重新分析。组件存储实际大小：{before.ActualSize} → {after.ActualSize}；剩余可回收包 {after.ReclaimablePackages} 个。此大小变化不是精确磁盘释放量。"
@@ -113,9 +115,37 @@ sealed class WindowsComponentStoreHost:IComponentStoreHost
   using var process=new Process{StartInfo=new(){FileName=Path.Combine(Environment.SystemDirectory,"dism.exe"),Arguments=arguments,
    UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true,StandardOutputEncoding=encoding,StandardErrorEncoding=encoding}};
   // Service operations are not force-killed on UI navigation, license expiry or shutdown.
-  process.Start();var stdout=process.StandardOutput.ReadToEndAsync();var stderr=process.StandardError.ReadToEndAsync();
+  process.Start();
+  var stage=arguments==ComponentStoreService.CleanupArguments?"Windows 组件清理":"Windows 组件分析";
+  var stdout=ComponentCommandOutput.ReadAsync(process.StandardOutput,stage,progress);var stderr=process.StandardError.ReadToEndAsync();
   await process.WaitForExitAsync().ConfigureAwait(false);
   return(process.ExitCode,(await stdout.ConfigureAwait(false))+Environment.NewLine+(await stderr.ConfigureAwait(false)));
+ }
+}
+// DISM updates progress using carriage returns as well as newlines. Drain continuously;
+// never wait for process exit (or a newline) before showing progress to the user.
+public static class ComponentCommandOutput
+{
+ public static async Task<string> ReadAsync(TextReader reader,string stage,IProgress<RepairProgress>? progress)
+ {
+  var output=new StringBuilder();var line=new StringBuilder();var buffer=new char[512];int count;
+  while((count=await reader.ReadAsync(buffer.AsMemory()).ConfigureAwait(false))>0)
+  {
+   output.Append(buffer,0,count);
+   for(int i=0;i<count;i++)
+   {
+    char ch=buffer[i];
+    if(ch is '\r' or '\n'){Report(line.ToString());line.Clear();}
+    else {line.Append(ch);if(ch=='%')Report(line.ToString());if(line.Length>8192)line.Remove(0,4096);}
+   }
+  }
+  Report(line.ToString());return output.ToString();
+  void Report(string text)
+  {
+   var match=Regex.Match(text,@"(?<![\d.])(\d{1,3}(?:[.,]\d+)?)\s*%");
+   if(match.Success&&double.TryParse(match.Groups[1].Value.Replace(',','.'),NumberStyles.AllowDecimalPoint,CultureInfo.InvariantCulture,out var value)&&value<=100)
+    progress?.Report(new((int)value,stage));
+  }
  }
 }
 public static class WindowsMaintenanceState
