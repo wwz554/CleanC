@@ -263,6 +263,7 @@ public sealed partial class MainWindow
  async Task StartScan()
  {
   if(scanRunning){SetStatus("扫描已经在后台运行。");return;}
+  if(ComponentWorkRunning){await Notice("组件维护正在运行","请等待 Windows 组件分析或清理完成后重新扫描。");return;}
   if(cleanupRunning||cleanupFinalizing){await Notice("清理正在进行","清理或清理后的安全整理仍在后台进行，请稍后再重新扫描，避免扫描数据库同时被修改。");return;}
   services.License.Context.Demand(FeatureCapability.Scan);
   var previousCache=InvalidateCleanupCache();scanRunning=true;scanCancellation=new();scanPercentValue=0;scanDetail="正在准备扫描…";scanStatus="正在扫描 C 盘…";scanProgressView=null;resultsKind=SafetyLevel.Safe;resultsPage=0;
@@ -304,7 +305,7 @@ public sealed partial class MainWindow
    else
    {
     vm.LastScan=completedScan;scanPercentValue=100;scanStatus="扫描完成";scanDetail=$"{completedScan.Files:N0} 个文件 · {completedScan.Elapsed.TotalSeconds:0.0} 秒";UpdateScanVisual();
-    scanRunning=false;
+    // Keep ownership through cache publication and DISM analysis; a second scan must not reset this database.
     if(scanCacheTask is not null&&!scanCacheTask.IsCompleted)
     {
      SetStatus($"扫描完成 · {completedScan.Files:N0} 个文件 · 正在构建智能缓存…");
@@ -321,7 +322,10 @@ public sealed partial class MainWindow
      if(currentPage=="clean")await TransitionContentAsync(()=>ShowCacheLoading(),false,true);
      return;
     }
-    SetStatus($"扫描与智能缓存均已完成 · {completedScan.Files:N0} 个文件 · {completedScan.Elapsed.TotalSeconds:0.0} 秒");
+    await AnalyzeComponentsAfterScan();
+    if(closingPending)return;
+    scanRunning=false;
+    SetStatus($"文件扫描完成 · {completedScan.Files:N0} 个文件 · {completedScan.Elapsed.TotalSeconds:0.0} 秒；"+componentStatus);
     if(!closingPending)
     {
      currentPage="clean";UpdateNavigationSelection(true);await TransitionContentAsync(()=>ShowCleanup(),false,true);
@@ -365,7 +369,7 @@ public sealed partial class MainWindow
   if(scanRunning){ShowScanProgressPage();return;}
   if(cleanupRunning){ShowCleanupProgressPage();return;}
   if(cleanupFinalizing){pageHost.Content=Ui.Stack(24,Heading("SMART CLEAN","清理已经完成","正在后台更新清理结果与智能缓存；无需等待，可以切换到其他页面。"),Ui.GlassCard(Ui.Stack(12,Ui.T("正在后台整理最新结果…",20,true),Ui.T("删除与安全复核已经结束。这里只是在更新列表和缓存，不会继续删除文件。",12,false,Ui.Muted)),new Thickness(24)));return;}
-  if(vm.LastScan is null){pageHost.Content=Ui.Stack(24,Heading("SMART CLEAN","智能清理","先扫描，再按真实文件夹查看。推荐安全项默认勾选，但任何可删除文件都由你最终决定。"),Ui.Card(Ui.Stack(24,Ui.Icon("\uE74D",40),Ui.T("按文件夹整理，一眼看清缓存、个人文件和受保护内容。",22,true),Ui.T("安全项默认勾选，可随时取消；可选和用户数据默认不勾选；受保护内容永远不能删除。",14,false,Ui.Muted),Ui.Button("开始扫描",()=>_=Guard(StartScan),true))));return;}
+  if(vm.LastScan is null){pageHost.Content=Ui.Stack(24,Heading("SMART CLEAN","智能清理","先扫描，再按真实文件夹查看。推荐安全项默认勾选，但任何可删除文件都由你最终决定。"),Ui.Card(Ui.Stack(24,Ui.Icon("\uE74D",40),Ui.T("按文件夹整理，一眼看清缓存、个人文件和受保护内容。",22,true),Ui.T("安全项默认勾选，可随时取消；可选和用户数据默认不勾选；受保护内容永远不能删除。",14,false,Ui.Muted),Ui.Button("开始扫描",()=>_=Guard(StartScan),true))),BuildComponentStoreCard());return;}
   lock(cleanupCacheLock){if(!cleanupCacheReady){ShowCacheLoading();return;}}
 
   long selected;int selectedCount;List<CleanupFolderGroup> folders;int totalPages;
@@ -398,7 +402,7 @@ public sealed partial class MainWindow
    SafetyLevel.Protected=>"系统、应用程序本体、配置/状态、恢复数据、便携程序和无法证明安全的文件只能查看，不能选择删除。",
    _=>"只推荐明确且稳定的旧缓存：浏览器/普通应用缓存需超过 7 天，着色器缓存需超过 30 天；最近常用缓存不会默认清理。"
   };
-  pageHost.Content=Ui.Stack(24,Heading("SMART CLEAN",vm.LastScan.Canceled?"扫描已停止":"扫描完成",subtitle),Ui.Card(stats),filters,Ui.Card(Ui.Stack(10,content,pages),new Thickness(16)));
+  pageHost.Content=Ui.Stack(20,Heading("SMART CLEAN",vm.LastScan.Canceled?"扫描已停止":"扫描完成",subtitle),Ui.Card(stats),BuildComponentStoreCard(),filters,Ui.Card(Ui.Stack(10,content,pages),new Thickness(16)));
  }
 
  Border BuildRecycleBinRow()

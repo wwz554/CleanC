@@ -14,6 +14,7 @@ public sealed class CleanupExecutor(ICapabilityGate gate,SafetyPolicy policy,Aud
  CleanupReport Run(IReadOnlyList<ScanItem> items,bool dryRun,IProgress<CleanupProgress>? progress,CancellationToken token,Action<CleanupOutcome>? outcomeSink)
  {
   gate.Demand(FeatureCapability.Cleanup);
+  using var maintenance=MaintenanceLock.Enter();
   var started=DateTimeOffset.UtcNow;var outcomes=new List<CleanupOutcome>(items.Count);long freed=0;int deleted=0,skipped=0;bool canceled=false;
   void AddOutcome(CleanupOutcome item){outcomes.Add(item);try{outcomeSink?.Invoke(item);}catch(Exception e){log.Write("Cleanup","OutcomeSink","Ignored",detail:e.GetType().Name);}}
   var ui=Stopwatch.StartNew();var ordered=items.OrderBy(x=>Path.GetDirectoryName(x.File.Path),StringComparer.OrdinalIgnoreCase).ToList();

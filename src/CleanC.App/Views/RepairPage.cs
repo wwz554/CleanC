@@ -7,7 +7,7 @@ public sealed partial class MainWindow
 {
  RepairAction repairUiAction=RepairAction.FullRepair;double repairUiPercent;string repairUiStatus="准备就绪",repairUiResult="";
  int repairUiWorkflowCount;
- bool RepairBackgroundWorkRunning=>services.Repair.IsRunning||Volatile.Read(ref repairUiWorkflowCount)>0;
+ bool RepairBackgroundWorkRunning=>services.Repair.IsRunning||Volatile.Read(ref repairUiWorkflowCount)>0||ComponentWorkRunning;
  ProgressBar? repairBar;TextBlock? repairPercentText,repairStatusText;TextBox? repairResultBox;Button? repairRunButton;ComboBox? repairSelector;UIElement? repairViewCache;
 
  void ShowRepair()

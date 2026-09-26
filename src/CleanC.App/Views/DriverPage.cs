@@ -457,8 +457,7 @@ public sealed partial class MainWindow
      DriverDevice? verified=null;
      if(result.Success||wasHealthyUpgrade)
      {
-      await VerifySingleDriver(device,false);
-      verified=CurrentDriver(device.DeviceId);
+      verified=await VerifySingleDriver(device,false);
      }
 
      if(wasHealthyUpgrade&&verified is not null&&verified.Health is DriverHealth.Missing or DriverHealth.Problem)
@@ -484,9 +483,14 @@ public sealed partial class MainWindow
        op.Active=false;op.Percent=restored.Success?100:0;op.Stage=restored.Success?"已恢复原驱动":"自动恢复失败";
        if(restored.Success)
        {
-        await VerifySingleDriver(verified,false);
-        var afterRestore=CurrentDriver(device.DeviceId);
-        if(afterRestore is not null&&afterRestore.Health==DriverHealth.Normal)
+        var afterRestore=await VerifySingleDriver(verified,false);
+        if(restored.RequiresRestart)
+        {
+         services.Drivers.MarkBackupPendingRestart(backup,"回退操作要求重启，不能提前解除备份保护");
+         SetStatus("原驱动回退命令已完成，请重启后再检测。");
+         await Notice("回退需要重启",restored.Message);
+        }
+        else if(afterRestore is not null&&afterRestore.ProblemCode==0)
         {
          services.Drivers.ReleaseBackupProtection(backup,"回退成功且驱动检测正常");
          driverRollbackCandidates.Remove(device.DeviceId);
@@ -515,7 +519,7 @@ public sealed partial class MainWindow
         $"{device.Name} 更新后检测为 {verified.StatusText}。\n\n本次升级前备份失败且用户选择继续，因此 CleanC 无法保证恢复原版本。已保留“回退”入口，用于尝试 Windows 自带回退机制。");
       }
      }
-     else if(wasHealthyUpgrade&&verified is not null&&verified.Health==DriverHealth.Normal)
+     else if(wasHealthyUpgrade&&verified is not null&&verified.ProblemCode==0)
      {
       if(backup is not null)
       {
@@ -533,6 +537,17 @@ public sealed partial class MainWindow
         :$"{device.Name} {(result.Success?"升级完成":"升级未完成，但原驱动仍正常")} · 备份已转入安全清理，可由用户选择删除。");
      }
      else if(result.Success&&result.RequiresRestart)SetStatus($"{device.Name} 安装完成，需要重启后完全生效。");
+     else if(result.Success&&verified is null)
+     {
+      if(backup is not null)services.Drivers.ProtectBackup(backup,"安装返回成功，但未完成设备复检");
+      op.Error="安装命令完成，但设备复检失败；请重新检测。";driverOperations[device.DeviceId]=op;RefreshDriverActionHosts(device.DeviceId);
+      await Notice("安装结果待确认",op.Error);
+     }
+     else if(result.Success&&verified?.ProblemCode!=0)
+     {
+      op.Error="安装已结束，但设备仍然异常；请重启或检查厂商支持。";driverOperations[device.DeviceId]=op;RefreshDriverActionHosts(device.DeviceId);
+      await Notice("设备仍需处理",op.Error);
+     }
      else if(!result.Success)
      {
       if(!wasHealthyUpgrade||verified is null){op.Error=result.Message;driverOperations[device.DeviceId]=op;RefreshDriverActionHosts(device.DeviceId);}
@@ -587,9 +602,12 @@ public sealed partial class MainWindow
    op.Active=false;op.Percent=result.Success?100:0;op.Stage=result.Success?"回退完成":"回退失败";
    if(!result.Success){op.Error=result.Message;RefreshDriverActionHosts(current.DeviceId);await Notice("驱动回退失败",result.Message);return;}
 
-   await VerifySingleDriver(current,false);
-   var verified=CurrentDriver(current.DeviceId);
-   if(verified is not null&&verified.Health==DriverHealth.Normal)
+   var verified=await VerifySingleDriver(current,false);
+   if(result.RequiresRestart)
+   {
+    if(backup is not null)services.Drivers.MarkBackupPendingRestart(backup,"手动回退需要重启后再次确认");
+   }
+   else if(verified is not null&&verified.ProblemCode==0)
    {
     if(backup is not null)services.Drivers.ReleaseBackupProtection(backup,"手动回退成功且驱动检测正常");
     driverRollbackCandidates.Remove(current.DeviceId);
@@ -609,7 +627,7 @@ public sealed partial class MainWindow
 
  DriverDevice? CurrentDriver(string deviceId)=>driverScanResult?.Devices.FirstOrDefault(x=>x.DeviceId.Equals(deviceId,StringComparison.OrdinalIgnoreCase));
 
- async Task VerifySingleDriver(DriverDevice device,bool showResult=true)
+ async Task<DriverDevice?> VerifySingleDriver(DriverDevice device,bool showResult=true)
  {
   Interlocked.Increment(ref driverUiWorkflowCount);
   try
@@ -619,17 +637,19 @@ public sealed partial class MainWindow
   try
   {
    var updated=await services.Drivers.VerifyDeviceAsync(device);
-   if(updated is null){op.Active=false;op.Error="没有重新枚举到该设备。";RefreshDriverActionHosts(device.DeviceId);return;}
+   if(updated is null){op.Active=false;op.Error="没有重新枚举到该设备。";RefreshDriverActionHosts(device.DeviceId);return null;}
    op.Percent=100;op.Stage="检测完成";op.Active=false;op.Error=null;
    ReplaceDriverResult(updated);
    driverOperations.Remove(device.DeviceId);
    RefreshDriverPagePreservePosition();
    if(showResult)SetStatus(updated.Health==DriverHealth.Normal?$"{updated.Name} · 驱动正常":$"{updated.Name} · {updated.StatusText}");
+   return updated;
   }
    catch(Exception e)
    {
     op.Active=false;op.Error=e.Message;op.Stage="检测失败";op.Percent=0;RefreshDriverActionHosts(device.DeviceId);
     if(showResult)await Notice("检测失败",e.Message);
+    return null;
    }
   }
   finally
@@ -645,7 +665,9 @@ public sealed partial class MainWindow
   var devices=driverScanResult.Devices.Select(x=>x.DeviceId.Equals(updated.DeviceId,StringComparison.OrdinalIgnoreCase)?updated:x).ToList();
   var updates=devices.Count(x=>x.Update is not null);
   var problems=devices.Count(x=>x.Health is DriverHealth.Missing or DriverHealth.Problem);
-  driverScanResult=driverScanResult with{EndedAt=DateTimeOffset.UtcNow,Devices=devices,UpdateCount=updates,ProblemCount=problems};
+  driverScanResult=driverScanResult with{EndedAt=DateTimeOffset.UtcNow,Devices=devices,UpdateCount=updates,ProblemCount=problems,
+   OfficialCheckSucceeded=driverScanResult.OfficialCheckSucceeded&&updated.OfficialCheckSucceeded,
+   OfficialCheckWarning=updated.OfficialCheckSucceeded?driverScanResult.OfficialCheckWarning:"设备本机复检已完成，但在线驱动查询失败，请重新全面扫描。"};
   driverViewCache=null;
  }
 

@@ -408,6 +408,7 @@ public sealed partial class MainWindow : Window
   // Return to the task that is actually still running. Space Analysis itself is
   // only a dashboard and never counts as background work.
   if(cleanupRunning)currentPage="clean";
+  else if(ComponentWorkRunning)currentPage="clean";
   else if(DriverBackgroundWorkRunning){currentPage="driver";driverViewCache=null;}
   else if(RepairBackgroundWorkRunning){currentPage="repair";repairViewCache=null;}
   else if(fileMoveRunning)currentPage="space";
@@ -417,6 +418,7 @@ public sealed partial class MainWindow : Window
   try{RenderPage();}catch(Exception e){services.Log.Write("App","RestoreHiddenUi","Failed",detail:e.ToString());}
 
   if(cleanupRunning)SetStatus("清理仍在后台执行。");
+  else if(ComponentWorkRunning)SetStatus(componentStatus);
   else if(DriverBackgroundWorkRunning)SetStatus("驱动任务仍在后台执行，已恢复真实进度。");
   else if(RepairBackgroundWorkRunning)SetStatus("系统检查 / 修复仍在后台执行，已恢复真实进度。");
   else if(fileMoveRunning)SetStatus("文件处理仍在后台执行。");
@@ -751,4 +753,3 @@ public sealed partial class MainWindow : Window
   if(scanRunning)overviewScanningView=view;else overviewIdleView=view;pageHost.Content=view;
  }
 }
-

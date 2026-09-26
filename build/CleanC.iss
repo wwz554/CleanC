@@ -1,4 +1,4 @@
-#define AppVersion "1.6.9"
+#define AppVersion "1.7.0"
 [Setup]
 AppId={{728E2BF8-5E71-4C4B-B5E4-B9C12F7CAE22}
 AppName=CleanC
