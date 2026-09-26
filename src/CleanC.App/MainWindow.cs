@@ -23,8 +23,8 @@ public sealed partial class MainWindow : Window
  CancellationTokenSource? scanCancellation,cleanupCancellation,fileMoveCancellation;
  volatile bool scanRunning,cleanupRunning,cleanupFinalizing,fileMoveRunning;int transientDatabaseReaders;
  bool TransientDatabaseReadRunning=>Volatile.Read(ref transientDatabaseReaders)>0;
- bool AnyTaskRunning=>scanRunning||cleanupRunning||cleanupFinalizing||fileMoveRunning||RepairBackgroundWorkRunning||DriverBackgroundWorkRunning;
- bool PreservedBackgroundWorkRunning=>cleanupRunning||cleanupFinalizing||fileMoveRunning||RepairBackgroundWorkRunning||DriverBackgroundWorkRunning;
+ bool AnyTaskRunning=>scanRunning||cleanupPreparing||cleanupRunning||cleanupFinalizing||fileMoveRunning||RepairBackgroundWorkRunning||DriverBackgroundWorkRunning;
+ bool PreservedBackgroundWorkRunning=>cleanupPreparing||cleanupRunning||cleanupFinalizing||fileMoveRunning||RepairBackgroundWorkRunning||DriverBackgroundWorkRunning;
  LicenseState previousState=LicenseState.Uninitialized;
  readonly List<Button> navigation=[];
  nint windowIconSmall,windowIconBig;bool windowIconApplied;
@@ -315,7 +315,8 @@ public sealed partial class MainWindow : Window
   {
    var state=services.License.Context.State;
    licenseDot.Foreground=state==LicenseState.Active?Ui.Success:Ui.Muted;
-   licenseCaption.Text=state==LicenseState.Active?"已激活":state is LicenseState.Expired or LicenseState.ExpiredOffline?"已到期":"未激活";
+   licenseCaption.Text=services.License.Context.Caption;
+   ToolTipService.SetToolTip(licenseCaption,services.License.Context.StatusText);
    licenseCountdown.Text=services.License.Context.Countdown;if(settingsCountdownValue is not null)settingsCountdownValue.Text=services.License.Context.Countdown;
   }
   catch(Exception e){services.Log.Write("App","LicenseDisplay","Failed",detail:e.GetType().Name);}
@@ -737,7 +738,9 @@ public sealed partial class MainWindow : Window
    services.License.BeginOfflineActivation,
    async key => { await services.License.ActivateAsync(key); await TransitionContentAsync(RenderPage,false,false); },
    async code => { await services.License.CompleteOfflineActivationAsync(code); await TransitionContentAsync(RenderPage,false,false); },
-   CopyDevice);
+   CopyDevice,
+   services.License.Context.Lease is null?null:services.License.Context.StatusText,
+   async()=>{await services.License.RefreshAsync();if(services.License.Context.State!=LicenseState.Active)throw new InvalidOperationException(services.License.Context.StatusText);await TransitionContentAsync(RenderPage,false,false);});
  }
  void CopyDevice(){var data=new Windows.ApplicationModel.DataTransfer.DataPackage();data.SetText(services.License.DeviceId);Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(data);SetStatus("设备码已复制。");}
  void ShowOverview()

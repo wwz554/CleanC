@@ -6,7 +6,7 @@ internal sealed record UpdateManifest(string Version,string Url,string Sha256,lo
 internal static class UpdateService
 {
  static readonly HttpClient http=new(){Timeout=TimeSpan.FromMinutes(20)};
- public static Version Current=>typeof(UpdateService).Assembly.GetName().Version??new Version(1,7,0);
+ public static Version Current=>typeof(UpdateService).Assembly.GetName().Version??new Version(1,7,1);
  public static async Task<UpdateManifest?> CheckAsync(CancellationToken token=default)
  {
   using var request=new HttpRequestMessage(HttpMethod.Get,"https://raw.githubusercontent.com/wwz554/CleanC/main/updates/latest.json");request.Headers.UserAgent.ParseAdd("CleanC/"+Current);request.Headers.CacheControl=new(){NoCache=true};

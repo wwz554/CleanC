@@ -23,6 +23,8 @@ public sealed partial class MainWindow
  ProgressBar? scanBar,cleanupBar;TextBlock? scanPercentText,scanDetailText,scanStatusText,cleanupPercentText,cleanupDetailText,cleanupStatusText;
  double scanPercentValue,cleanupPercentValue;string scanDetail="正在准备扫描…",scanStatus="正在扫描 C 盘…",cleanupDetail="正在准备清理…",cleanupStatus="正在安全清理";
  const int CleanupFolderPageSize=24,CleanupChildPageSize=20;
+ bool cleanupPreparing;
+ UIElement? cleanupResultView;
 
  sealed class CleanupFolderGroup
  {
@@ -264,10 +266,10 @@ public sealed partial class MainWindow
  {
   if(scanRunning){SetStatus("扫描已经在后台运行。");return;}
   if(ComponentWorkRunning){await Notice("组件维护正在运行","请等待 Windows 组件分析或清理完成后重新扫描。");return;}
-  if(cleanupRunning||cleanupFinalizing){await Notice("清理正在进行","清理或清理后的安全整理仍在后台进行，请稍后再重新扫描，避免扫描数据库同时被修改。");return;}
+  if(cleanupPreparing||cleanupRunning||cleanupFinalizing){await Notice("清理正在进行","清理或清理后的安全整理仍在后台进行，请稍后再重新扫描，避免扫描数据库同时被修改。");return;}
   services.License.Context.Demand(FeatureCapability.Scan);
-  var previousCache=InvalidateCleanupCache();scanRunning=true;scanCancellation=new();scanPercentValue=0;scanDetail="正在准备扫描…";scanStatus="正在扫描 C 盘…";scanProgressView=null;resultsKind=SafetyLevel.Safe;resultsPage=0;
-  ChannelWriter<(long First,long Last)>? cacheWriter=null;Task? scanCacheTask=null;
+  cleanupResultView=null;var previousCache=InvalidateCleanupCache();scanRunning=true;scanCancellation=new();scanPercentValue=0;scanDetail="正在准备扫描…";scanStatus="正在扫描 C 盘…";scanProgressView=null;resultsKind=SafetyLevel.Safe;resultsPage=0;
+  ChannelWriter<(long First,long Last)>? cacheWriter=null;Task? scanCacheTask=null;Task? componentScanTask=null;
   try
   {
    currentPage="clean";UpdateNavigationSelection(true);await TransitionContentAsync(()=>ShowScanProgressPage(),false,false);
@@ -282,6 +284,7 @@ public sealed partial class MainWindow
   double shown=0;
   try
   {
+   componentScanTask=AnalyzeComponentsDuringScan();
    var pipeline=StartScanCachePipeline();cacheWriter=pipeline.Writer;scanCacheTask=pipeline.Task;var activeCacheWriter=pipeline.Writer;
    using var progress=new DispatcherProgress<ScanProgress>(DispatcherQueue,p=>{
     var next=Math.Max(shown,EstimateScanPercent(p));shown=next;scanPercentValue=next;scanDetail=$"已扫描 {p.Files:N0} 个文件 · {p.Directories:N0} 个目录 · 跳过 {p.Skipped:N0} 项 · 智能缓存同步构建中";UpdateScanVisual();
@@ -304,7 +307,7 @@ public sealed partial class MainWindow
    }
    else
    {
-    vm.LastScan=completedScan;scanPercentValue=100;scanStatus="扫描完成";scanDetail=$"{completedScan.Files:N0} 个文件 · {completedScan.Elapsed.TotalSeconds:0.0} 秒";UpdateScanVisual();
+    vm.LastScan=completedScan;scanPercentValue=97;scanStatus="文件扫描完成，正在收尾";scanDetail=$"{completedScan.Files:N0} 个文件 · {completedScan.Elapsed.TotalSeconds:0.0} 秒";UpdateScanVisual();
     // Keep ownership through cache publication and DISM analysis; a second scan must not reset this database.
     if(scanCacheTask is not null&&!scanCacheTask.IsCompleted)
     {
@@ -322,7 +325,13 @@ public sealed partial class MainWindow
      if(currentPage=="clean")await TransitionContentAsync(()=>ShowCacheLoading(),false,true);
      return;
     }
-    await AnalyzeComponentsAfterScan();
+    if(componentScanTask is {IsCompleted:false})
+    {
+     scanStatus="文件扫描完成 · 等待并行组件分析收尾";scanDetail="Windows 组件分析从扫描开始时已同步进行；普通文件已扫描完毕。";UpdateScanVisual();
+     if(currentPage=="clean")await TransitionContentAsync(()=>ShowScanProgressPage(),false,true);
+    }
+    if(componentScanTask is not null)await componentScanTask;
+    scanPercentValue=100;
     if(closingPending)return;
     scanRunning=false;
     SetStatus($"文件扫描完成 · {completedScan.Files:N0} 个文件 · {completedScan.Elapsed.TotalSeconds:0.0} 秒；"+componentStatus);
@@ -341,7 +350,7 @@ public sealed partial class MainWindow
   }
   finally
   {
-   cacheWriter?.TryComplete();scanRunning=false;scanCancellation?.Dispose();scanCancellation=null;scanBar=null;scanPercentText=null;scanDetailText=null;scanStatusText=null;scanProgressView=null;InvalidateOverviewCache();
+   cacheWriter?.TryComplete();if(componentScanTask is not null)await componentScanTask;scanRunning=false;scanCancellation?.Dispose();scanCancellation=null;scanBar=null;scanPercentText=null;scanDetailText=null;scanStatusText=null;scanProgressView=null;InvalidateOverviewCache();
    if(!closingPending)
    {
     if(vm.LastScan is null)ClearSpaceCache();
@@ -368,26 +377,29 @@ public sealed partial class MainWindow
  {
   if(scanRunning){ShowScanProgressPage();return;}
   if(cleanupRunning){ShowCleanupProgressPage();return;}
+  if(cleanupPreparing){pageHost.Content=Ui.Stack(20,Heading("SMART CLEAN","正在复核所选项目","清理前检查路径、文件变化与保护规则；此时尚未删除文件。"),new ProgressBar{IsIndeterminate=true});return;}
+  if(cleanupResultView is not null){pageHost.Content=cleanupResultView;return;}
   if(cleanupFinalizing){pageHost.Content=Ui.Stack(24,Heading("SMART CLEAN","清理已经完成","正在后台更新清理结果与智能缓存；无需等待，可以切换到其他页面。"),Ui.GlassCard(Ui.Stack(12,Ui.T("正在后台整理最新结果…",20,true),Ui.T("删除与安全复核已经结束。这里只是在更新列表和缓存，不会继续删除文件。",12,false,Ui.Muted)),new Thickness(24)));return;}
-  if(vm.LastScan is null){pageHost.Content=Ui.Stack(24,Heading("SMART CLEAN","智能清理","先扫描，再按真实文件夹查看。推荐安全项默认勾选，但任何可删除文件都由你最终决定。"),Ui.Card(Ui.Stack(24,Ui.Icon("\uE74D",40),Ui.T("按文件夹整理，一眼看清缓存、个人文件和受保护内容。",22,true),Ui.T("安全项默认勾选，可随时取消；可选和用户数据默认不勾选；受保护内容永远不能删除。",14,false,Ui.Muted),Ui.Button("开始扫描",()=>_=Guard(StartScan),true))),BuildComponentStoreCard());return;}
+  if(vm.LastScan is null){pageHost.Content=Ui.Stack(24,Heading("SMART CLEAN","智能清理","先扫描，再按真实文件夹查看。推荐安全项默认勾选，但任何可删除文件都由你最终决定。"),Ui.Card(Ui.Stack(24,Ui.Icon("\uE74D",40),Ui.T("按文件夹整理，一眼看清缓存、个人文件和受保护内容。",22,true),Ui.T("安全项默认勾选，可随时取消；可选和用户数据默认不勾选；受保护内容永远不能删除。",14,false,Ui.Muted),Ui.Button("开始扫描",()=>_=Guard(StartScan),true))));return;}
   lock(cleanupCacheLock){if(!cleanupCacheReady){ShowCacheLoading();return;}}
 
   long selected;int selectedCount;List<CleanupFolderGroup> folders;int totalPages;
   lock(cleanupCacheLock)
   {
-   selected=cleanupSelectedBytes+(recycleBinSelected?recycleBinInfo.Bytes:0);selectedCount=cleanupSelectedCount+(recycleBinSelected?1:0);
+   selected=cleanupSelectedBytes+(recycleBinSelected?recycleBinInfo.Bytes:0);selectedCount=cleanupSelectedCount+(recycleBinSelected?1:0)+(componentSelected?1:0);
    folders=cleanupFolderGroups.TryGetValue(resultsKind,out var g)?g:new List<CleanupFolderGroup>();
    totalPages=Math.Max(1,(int)Math.Ceiling(folders.Count/(double)CleanupFolderPageSize));if(resultsPage>=totalPages)resultsPage=totalPages-1;
    folders=folders.Skip(resultsPage*CleanupFolderPageSize).Take(CleanupFolderPageSize).ToList();
   }
 
-  cleanupSelectedBytesText=Ui.T(Display.Bytes(selected),40,true,Ui.Accent);cleanupSelectedCountText=Ui.T($"{selectedCount:N0} 项已选 · 安全项为推荐勾选，可随时取消",12,false,Ui.Muted);
+  cleanupSelectedBytesText=Ui.T(Display.Bytes(selected),40,true,Ui.Accent);cleanupSelectedCountText=Ui.T($"{selectedCount:N0} 项已选 · 组件清理释放量另计，可随时取消",12,false,Ui.Muted);
   cleanupCleanButton=Ui.Button("开始清理   "+Display.Bytes(selected),()=>{},true);cleanupCleanButton.Click+=async(_,_)=>await Guard(()=>RunCleanup(false));
   var stats=Ui.Columns(-1,-1);Ui.Add(stats,Ui.Stack(4,cleanupSelectedBytesText,cleanupSelectedCountText),0);
   var actions=Ui.Stack(12,cleanupCleanButton,Ui.Row(8,Ui.Button("预演",()=>_=Guard(()=>RunCleanup(true))),Ui.Button("重新扫描",()=>_=Guard(StartScan))));actions.HorizontalAlignment=HorizontalAlignment.Right;Ui.Add(stats,actions,1);
   var filters=Ui.Row(8);foreach(var (label,kind) in new[]{("安全清理",SafetyLevel.Safe),("可选 / 暂不清理",SafetyLevel.Optional),("用户数据",SafetyLevel.UserData),("受保护",SafetyLevel.Protected)})filters.Children.Add(Ui.Button(label,()=>SwitchCleanupKind(kind),resultsKind==kind));
 
   var folderStack=Ui.Stack(10);
+  if(resultsKind==SafetyLevel.Safe&&resultsPage==0)folderStack.Children.Add(BuildComponentStoreRow());
   foreach(var folder in folders)folderStack.Children.Add(BuildCleanupFolderCard(folder));
   if(folders.Count==0)folderStack.Children.Add(Ui.GlassCard(Ui.Stack(8,Ui.T("这个分类暂时没有项目。",16,true),Ui.T("重新扫描后会按最新文件状态重新整理。",12,false,Ui.Muted)),new Thickness(18)));
   var folderScroll=new ScrollViewer{Content=folderStack,Height=410,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled};
@@ -402,7 +414,7 @@ public sealed partial class MainWindow
    SafetyLevel.Protected=>"系统、应用程序本体、配置/状态、恢复数据、便携程序和无法证明安全的文件只能查看，不能选择删除。",
    _=>"只推荐明确且稳定的旧缓存：浏览器/普通应用缓存需超过 7 天，着色器缓存需超过 30 天；最近常用缓存不会默认清理。"
   };
-  pageHost.Content=Ui.Stack(20,Heading("SMART CLEAN",vm.LastScan.Canceled?"扫描已停止":"扫描完成",subtitle),Ui.Card(stats),BuildComponentStoreCard(),filters,Ui.Card(Ui.Stack(10,content,pages),new Thickness(16)));
+  pageHost.Content=Ui.Stack(20,Heading("SMART CLEAN",vm.LastScan.Canceled?"扫描已停止":"扫描完成",subtitle),Ui.Card(stats),filters,Ui.Card(Ui.Stack(10,content,pages),new Thickness(16)));
  }
 
  Border BuildRecycleBinRow()
@@ -563,8 +575,8 @@ public sealed partial class MainWindow
  }
  void UpdateSelectionSummaryVisual()
  {
-  long bytes;int count;lock(cleanupCacheLock){bytes=cleanupSelectedBytes+(recycleBinSelected?recycleBinInfo.Bytes:0);count=cleanupSelectedCount+(recycleBinSelected?1:0);}
-  if(cleanupSelectedBytesText is not null)cleanupSelectedBytesText.Text=Display.Bytes(bytes);if(cleanupSelectedCountText is not null)cleanupSelectedCountText.Text=$"{count:N0} 项已选 · 安全项为推荐勾选，可随时取消";if(cleanupCleanButton is not null)cleanupCleanButton.Content="开始清理   "+Display.Bytes(bytes);
+  long bytes;int count;lock(cleanupCacheLock){bytes=cleanupSelectedBytes+(recycleBinSelected?recycleBinInfo.Bytes:0);count=cleanupSelectedCount+(recycleBinSelected?1:0)+(componentSelected?1:0);}
+  if(cleanupSelectedBytesText is not null)cleanupSelectedBytesText.Text=Display.Bytes(bytes);if(cleanupSelectedCountText is not null)cleanupSelectedCountText.Text=$"{count:N0} 项已选 · 组件清理释放量另计，可随时取消";if(cleanupCleanButton is not null)cleanupCleanButton.Content="开始清理   "+Display.Bytes(bytes);
  }
  async Task PersistSelectionAsync(ScanItem item,bool value)
  {
@@ -591,10 +603,12 @@ public sealed partial class MainWindow
  async void SetCurrentKindSelectionCached(bool selected)
  {
   if(resultsKind==SafetyLevel.Protected)return;List<ScanItem> items;lock(cleanupCacheLock)items=cleanupGroups.TryGetValue(resultsKind,out var group)?group.ToList():new();
+  if(resultsKind==SafetyLevel.Safe)componentSelected=selected&&ComponentEligible;
   ApplySelectionsLocal(items,selected);await PersistSelectionsAsync(items,selected);if(currentPage=="clean")await TransitionContentAsync(()=>ShowCleanup(),true,true);
  }
  async void ClearSelectionsCached()
  {
+  componentSelected=false;
   await selectionWriteGate.WaitAsync();
   try{await Task.Run(()=>{lock(cleanupCacheLock){cleanupSelectedIds.Clear();cleanupSelectedBytes=0;cleanupSelectedCount=0;recycleBinSelected=false;}services.Database.ClearSelections();});}
   finally{selectionWriteGate.Release();}
@@ -602,6 +616,7 @@ public sealed partial class MainWindow
  }
  async void RestoreRecommendedSelectionsCached()
  {
+  componentSelected=ComponentEligible;
   await selectionWriteGate.WaitAsync();
   try
   {
@@ -737,12 +752,26 @@ public sealed partial class MainWindow
   if(cleanupProgressView is not null){pageHost.Content=cleanupProgressView;UpdateCleanupVisual();return;}
   cleanupStatusText=Ui.T(cleanupStatus,28,true);cleanupPercentText=Ui.T($"{cleanupPercentValue:0}%",13,true,Ui.Accent);cleanupDetailText=Ui.T(cleanupDetail,12,false,Ui.Muted);
   cleanupBar=new ProgressBar{Minimum=0,Maximum=100,Value=cleanupPercentValue,Height=8,HorizontalAlignment=HorizontalAlignment.Stretch};
-  cleanupProgressView=Ui.Stack(24,Heading("CLEAN WITH CARE",cleanupStatus,"文件直接永久删除，不进入回收站；任务在后台执行，不影响界面与授权倒计时。"),Ui.GlassCard(Ui.Stack(16,cleanupStatusText,cleanupBar,Ui.Row(10,cleanupPercentText,cleanupDetailText),Ui.Button("停止",()=>cleanupCancellation?.Cancel()))));
+  cleanupStopButton=Ui.Button(componentCleanupStage?"Windows 维护中，请等待":"停止",()=>{cleanupCancellation?.Cancel();cleanupStopButton!.IsEnabled=false;cleanupDetail="已请求停止，正在完成当前项目和结果同步…";UpdateCleanupVisual();});
+  cleanupStopButton.IsEnabled=!componentCleanupStage;cleanupElapsedText=Ui.T("已用时 00:00",12,false,Ui.Muted);
+  cleanupProgressView=Ui.Stack(24,Heading("CLEAN WITH CARE","安全清理","文件直接永久删除，不进入回收站；组件维护开始后请勿关机。"),Ui.GlassCard(Ui.Stack(16,cleanupStatusText,cleanupBar,Ui.Row(10,cleanupPercentText,cleanupDetailText),cleanupElapsedText,cleanupStopButton)));
   pageHost.Content=cleanupProgressView;
  }
- void UpdateCleanupVisual(){if(cleanupBar is not null)cleanupBar.Value=cleanupPercentValue;if(cleanupPercentText is not null)cleanupPercentText.Text=$"{cleanupPercentValue:0}%";if(cleanupDetailText is not null)cleanupDetailText.Text=cleanupDetail;if(cleanupStatusText is not null)cleanupStatusText.Text=cleanupStatus;}
+ void UpdateCleanupVisual(){if(cleanupBar is not null){cleanupBar.IsIndeterminate=cleanupPercentValue<0;cleanupBar.Value=Math.Max(0,cleanupPercentValue);}if(cleanupPercentText is not null)cleanupPercentText.Text=cleanupPercentValue<0?"处理中":$"{cleanupPercentValue:0}%";if(cleanupDetailText is not null)cleanupDetailText.Text=cleanupDetail;if(cleanupStatusText is not null)cleanupStatusText.Text=cleanupStatus;}
 
  async Task RunCleanup(bool dryRun)
+ {
+  if(AnyTaskRunning){await Notice("请等待当前任务完成","扫描、清理或其他维护任务仍在进行。");return;}
+  cleanupPreparing=true;cleanupResultView=null;
+  try{await RunCleanupCore(dryRun);}
+  finally
+  {
+   cleanupPreparing=false;
+   if(currentPage=="clean"&&!closingPending)await TransitionContentAsync(RenderPage,false,true);
+   TryFinishPendingClose();
+  }
+ }
+ async Task RunCleanupCore(bool dryRun)
  {
   if(cleanupRunning||cleanupFinalizing){SetStatus("清理任务已经在后台运行。");return;}if(scanRunning){await Notice("扫描正在进行","请等待扫描与智能缓存都完成后再开始清理。系统修复可以与扫描同时进行。");return;}if(RepairBackgroundWorkRunning){await Notice("系统检查或修复正在进行","扫描可以与系统检查同时运行，但清理会写入磁盘。请等待系统任务结束后再开始清理。");return;}if(services.Drivers.IsInstalling){await Notice("驱动正在安装","请等待驱动安装完成后再执行文件清理。");return;}
   services.License.Context.Demand(FeatureCapability.Cleanup);
@@ -756,7 +785,9 @@ public sealed partial class MainWindow
    }
   }
   if(!cleanupCacheReady){await Notice("智能缓存尚未完成","本次扫描的智能缓存不可用或仍未完成。CleanC 不会重新从数据库构建缓存，请重新扫描后再清理。");return;}
+  if(currentPage=="clean")await TransitionContentAsync(()=>ShowCleanup(),false,true);
   await Task.Yield();
+  bool includeComponents=componentSelected&&ComponentEligible;
   (List<ScanItem> Items,long Bytes,int Optional,int User,bool Recycle,RecycleBinInfo RecycleInfo) selection;
   selection=await Task.Run(() =>
   {
@@ -764,7 +795,7 @@ public sealed partial class MainWindow
    return(Items:list,Bytes:list.Sum(x=>x.File.Size),Optional:list.Count(x=>x.Classification.Safety==SafetyLevel.Optional),User:list.Count(x=>x.Classification.Safety==SafetyLevel.UserData),Recycle:recycle,RecycleInfo:rb);
   });
   var preflight=await PreflightCleanupItemsAsync(selection.Items);ApplyCleanupCacheChanges(preflight.CacheChanges);
-  var items=preflight.Ready;var targetCount=items.Count+(selection.Recycle?1:0);
+  var items=preflight.Ready;var targetCount=items.Count+(selection.Recycle?1:0)+(includeComponents?1:0);
   if(preflight.RemovedMissing>0||preflight.Reclassified>0)SetStatus($"清理前已复核：移除失效路径 {preflight.RemovedMissing:N0} 项 · 重新分级 {preflight.Reclassified:N0} 项");
   if(targetCount==0)
   {
@@ -780,16 +811,22 @@ public sealed partial class MainWindow
    var drives=selection.RecycleInfo.DriveItems.Count==0?"本地磁盘":string.Join("、",selection.RecycleInfo.DriveItems.Select(x=>x.Root.TrimEnd('\\')));
    warning+=$"\n\n已选择‘回收站’：将清空当前用户在 {drives} 上的回收站，共 {selection.RecycleInfo.Items:N0} 项（{Display.Bytes(selection.RecycleInfo.Bytes)}）。";
   }
+  if(includeComponents)warning+="\n\n包含 Windows 旧组件：由系统复核后移除被替代的组件，不使用 ResetBase。释放量无法预估；此阶段不可强行中断，结果会单独列出。";
   if(!dryRun&&!await Confirm("即将清理 "+amount,$"将直接永久处理 {targetCount:N0} 个已选目标，不创建恢复副本。{warning}\n\n占用中、已变化或安全级别变高的文件会自动跳过。","开始清理"))
   {
    await RefreshCleanupViewIndexFromMemoryAsync();if(currentPage=="clean")ShowCleanup();return;
   }
 
+  if(scanRunning||cleanupRunning||cleanupFinalizing||fileMoveRunning||RepairBackgroundWorkRunning||DriverBackgroundWorkRunning){await Notice("任务状态已变化","请等待其他任务结束后重试。");return;}
   cleanupRunning=true;cleanupFinalizing=false;cleanupCancellation=new();cleanupPercentValue=0;cleanupStatus=dryRun?"正在进行安全预演":"正在安全清理";cleanupDetail=$"0 / {targetCount:N0} 个目标";cleanupProgressView=null;
   try{await TransitionContentAsync(()=>ShowCleanupProgressPage(),false,false);}
   catch{cleanupRunning=false;cleanupCancellation?.Dispose();cleanupCancellation=null;cleanupProgressView=null;throw;}
   await Task.Yield();
+  var cleanupWatch=System.Diagnostics.Stopwatch.StartNew();
+  var elapsedTimer=new DispatcherTimer{Interval=TimeSpan.FromSeconds(1)};
+  elapsedTimer.Tick+=(_,_)=>{if(cleanupElapsedText is not null)cleanupElapsedText.Text=$"已用时 {cleanupWatch.Elapsed:hh\\:mm\\:ss}"+(componentCleanupStage?" · Windows 维护仍在运行，完成后会显示结果。":"");};elapsedTimer.Start();
   ChannelWriter<CleanupOutcome>? reconcileWriter=null;Task? reconcileTask=null;
+  CleanC.Repair.ComponentCleanupResult? componentResult=null;string componentOutcome=includeComponents?"组件清理尚未执行。":"未选择组件清理。";
   try
   {
    if(!dryRun&&items.Count>0)
@@ -818,6 +855,13 @@ public sealed partial class MainWindow
    }
 
    reconcileWriter?.TryComplete();reconcileWriter=null;
+   if(includeComponents)
+   {
+    if(report.Canceled||cleanupCancellation?.IsCancellationRequested==true)componentOutcome="已停止，未启动 Windows 组件清理。";
+    else if(dryRun)componentOutcome="预演：将调用 Windows 官方组件清理；本次未执行，释放量不预估。";
+    else {componentResult=await RunSelectedComponentCleanup();componentOutcome=componentResult.Message;}
+   }
+
    if(!dryRun)
    {
     cleanupStatus=report.Canceled?"正在完成停止前的数据同步":"正在完成安全清理";cleanupPercentValue=Math.Max(cleanupPercentValue,95);cleanupDetail="文件处理已经结束，正在等待并行的数据库复核与智能缓存同步收尾…";UpdateCleanupVisual();
@@ -837,24 +881,40 @@ public sealed partial class MainWindow
    else if(preflight.CacheChanges.Count>0)await RefreshCleanupViewIndexFromMemoryAsync();
 
    long after=await Task.Run(()=>new DriveInfo(vm.ScanRoot).AvailableFreeSpace);
-   cleanupPercentValue=100;cleanupStatus=dryRun?"预演完成":report.Canceled?"清理已停止":"安全清理完成";cleanupDetail=$"已处理 {report.Deleted:N0} 项 · 跳过 {report.Skipped:N0} 项";UpdateCleanupVisual();
-   cleanupRunning=false;cleanupFinalizing=false;
+   var stopped=report.Canceled||cleanupCancellation?.IsCancellationRequested==true;
+   cleanupPercentValue=100;cleanupStatus=dryRun?"预演完成":stopped?"清理已停止":componentResult is {RequiresRestart:true}?"文件清理完成 · 组件需重启":componentResult is {Completed:false}?"文件清理完成 · 组件未完成":"安全清理完成";cleanupDetail=$"已处理 {report.Deleted:N0} 项 · 跳过 {report.Skipped:N0} 项";UpdateCleanupVisual();
    var skippedHint=report.Skipped>0?report.Items.Where(x=>x.Result=="Skipped").GroupBy(x=>x.Detail).OrderByDescending(x=>x.Count()).Select(x=>x.Key).FirstOrDefault():null;
-   SetStatus(dryRun?"清理预演完成。":report.Canceled?"清理已停止，已处理项目的数据库与智能缓存同步完成。":$"安全清理完成 · 释放 {Display.Bytes(report.FreedBytes)} · 数据库与智能缓存已同步");
-   if(currentPage=="clean")await TransitionContentAsync(() =>
+   SetStatus(cleanupStatus+" · "+componentOutcome);
+   var summary=new {FinishedAt=DateTimeOffset.UtcNow,DryRun=dryRun,Status=cleanupStatus,FileBytes=report.FreedBytes,report.Deleted,report.Skipped,Component=componentOutcome,DiskBefore=before,DiskAfter=after};
+   var reportDirectory=Path.Combine(services.Log.DirectoryPath,"Reports");
+   try{Directory.CreateDirectory(reportDirectory);await File.WriteAllTextAsync(Path.Combine(reportDirectory,$"{DateTime.UtcNow:yyyyMMdd-HHmmss-fff}-cleanup-summary.json"),System.Text.Json.JsonSerializer.Serialize(summary));}
+   catch(Exception e){services.Log.Write("Cleanup","SummaryReport","Failed",detail:e.GetType().Name);}
    {
     var resultCard=Ui.Card(Ui.Stack(16,
      Ui.T(dryRun?Display.Bytes(report.Items.Where(x=>x.Result=="WouldDelete").Sum(x=>x.Bytes)):Display.Bytes(report.FreedBytes),48,true,Ui.Accent),
      Ui.T(dryRun?"符合清理条件 · 实际删除 0 项":"已处理目标的逻辑大小",14,false,Ui.Muted),
      Ui.T($"已处理 {report.Deleted:N0} 项 · 跳过 {report.Skipped:N0} 项",14),
      Ui.T(report.Skipped>0?$"未删除项目：{skippedHint}":"文件处理、数据库复核和智能缓存同步均已完成。",12,false,report.Skipped>0?Ui.Warning:Ui.Muted),
-     Ui.T($"C 盘可用空间：{Display.Bytes(before)} → {Display.Bytes(after)}",14),
-     Ui.Row(12,Ui.Button("返回清理结果",()=>_=TransitionContentAsync(()=>ShowCleanup(),false,true)),Ui.Button("查看报告",()=>OpenFolder(Path.Combine(services.Log.DirectoryPath,"Reports"))))));
-    pageHost.Content=Ui.Stack(24,Heading("ALL SET",dryRun?"预演完成":report.Canceled?"清理已停止":"安全清理完成",dryRun?"没有删除任何文件。":"文件处理与后台数据收尾已并行完成。"),resultCard);
-   },false,false);
+     Ui.T(componentOutcome,14,true,componentResult is {Completed:false}?Ui.Warning:Ui.Text),
+     Ui.T($"C 盘可用空间：{Display.Bytes(before)} → {Display.Bytes(after)}（实测，可能受其他程序影响）",14),
+     Ui.Row(12,Ui.Button("返回清理列表",()=>{cleanupResultView=null;_=TransitionContentAsync(()=>ShowCleanup(),false,true);}),Ui.Button("查看报告",()=>OpenFolder(Path.Combine(services.Log.DirectoryPath,"Reports"))))));
+    cleanupResultView=Ui.Stack(24,Heading("ALL SET",cleanupStatus,dryRun?"没有删除任何文件。":"文件处理与后台数据收尾已并行完成。"),resultCard);
+   }
+   if(currentPage=="clean")await TransitionContentAsync(()=>pageHost.Content=cleanupResultView,false,false);
+   else if(!closingPending)await Notice(cleanupStatus,componentOutcome+"\n普通文件处理 "+report.Deleted+" 项，跳过 "+report.Skipped+" 项。");
+  }
+  catch(Exception e)
+  {
+   services.Log.Write("Cleanup","Workflow","Failed",detail:e.ToString());
+   cleanupStatus="清理未能全部完成";SetStatus(cleanupStatus+"："+e.Message);
+   cleanupResultView=Ui.Stack(20,Heading("CLEANUP RESULT",cleanupStatus,"已处理的文件不会自动恢复；请查看报告，不把本次记为全部成功。"),
+    Ui.Card(Ui.Stack(12,Ui.T(e.Message,14,false,Ui.Warning),Ui.T(componentOutcome,13),
+     Ui.Row(10,Ui.Button("返回清理列表",()=>{cleanupResultView=null;_=TransitionContentAsync(()=>ShowCleanup(),false,true);}),
+      Ui.Button("查看日志",()=>OpenFolder(services.Log.DirectoryPath))))));
   }
   finally
   {
+   elapsedTimer.Stop();cleanupElapsedText=null;cleanupStopButton=null;
    reconcileWriter?.TryComplete();if(reconcileTask is not null&&!reconcileTask.IsCompleted){try{await reconcileTask;}catch(Exception e){services.Log.Write("Cleanup","FinalizeDrain","Failed",detail:e.GetType().Name);}}
    cleanupRunning=false;cleanupFinalizing=false;cleanupCancellation?.Dispose();cleanupCancellation=null;cleanupBar=null;cleanupPercentText=null;cleanupDetailText=null;cleanupStatusText=null;cleanupProgressView=null;TryFinishPendingClose();if(services.License.Context.State!=LicenseState.Active&&!RepairBackgroundWorkRunning)await TransitionContentAsync(RenderPage,false,false);
   }

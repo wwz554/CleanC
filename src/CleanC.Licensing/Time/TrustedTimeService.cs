@@ -27,8 +27,11 @@ public sealed class TrustedTimeService(ITimeSource source)
   if(state is null||state.LeaseNonce!=lease.Nonce||state.LastServerTimeUtc!=lease.ServerTime||state.LastObservedTrustedUtc<lease.ServerTime){Accept(lease);RollbackSuspected=true;return;}
   var local=source.SystemUtc;
   var elapsed=local-state.LocalUtc;
-  RollbackSuspected=elapsed<TimeSpan.FromMinutes(-2);
-  if(source.BootId!="unavailable"&&source.BootId==state.BootId){if(source.Uptime<state.Uptime)RollbackSuspected=true;elapsed=source.Uptime-state.Uptime;}
+  // Within the same boot the monotonic clock is stronger evidence than wall time
+  // (NTP/time-zone corrections must not revoke an otherwise valid offline license).
+  if(source.BootId!="unavailable"&&source.BootId==state.BootId)
+  {elapsed=source.Uptime-state.Uptime;RollbackSuspected=elapsed<TimeSpan.Zero;}
+  else RollbackSuspected=elapsed<TimeSpan.FromMinutes(-2);
   anchor=state.LastObservedTrustedUtc+Max(TimeSpan.Zero,elapsed);anchorUptime=source.Uptime;Initialized=true;
  }
  public TrustedTimeState Snapshot(Lease lease)=>new(lease.ServerTime,lease.ServerTime,Now,source.SystemUtc,source.Uptime,source.BootId,lease.Nonce,lease.ExpiresAt,lease.LicenseExpiresAt);

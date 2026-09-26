@@ -2,7 +2,7 @@
 setlocal
 cd /d "%~dp0"
 echo ========================================
-echo  CleanC one-click build 1.7.0
+echo  CleanC one-click build 1.7.1
 echo ========================================
 echo.
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -NoExit -File "%~dp0build-local.ps1"

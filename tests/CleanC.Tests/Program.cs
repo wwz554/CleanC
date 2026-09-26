@@ -188,6 +188,7 @@ sealed partial class Tests
    Check(!Directory.EnumerateFiles(root,"exit-cleanup.db.exit-*").Any());
   });
   await RunMaintenanceTests();
+  await Run171Tests();
   Console.WriteLine($"RESULT: {passed} passed, {Failed} failed. Fixtures: {root}");
  }
  Lease Lease(bool permanent=false)=>new(){Version=4,ApiVersion=3,LicenseId="license-test",DeviceId="DEVICE-TEST",Edition="Pro",LicenseType=permanent?"permanent":"duration",IsPermanent=permanent,CountdownRequired=!permanent,Features=["clean","scan","optimize"],IssuedAt=clock.SystemUtc,ServerTime=clock.SystemUtc,ExpiresAt=clock.SystemUtc.AddHours(72),LicenseExpiresAt=permanent?null:clock.SystemUtc.AddDays(7),LeaseHours=72,RenewalProtocol="challenge-refresh",Nonce="test-nonce"};
@@ -211,7 +212,8 @@ sealed partial class Tests
    if(Error is not null)return Json(new{success=false,code=Error},HttpStatusCode.Forbidden);
    var body=JsonDocument.Parse(await r.Content!.ReadAsStringAsync(ct));
    Check(body.RootElement.GetProperty("deviceId").GetString()=="DEVICE-TEST");
-   if(path=="device/challenge")return Json(new{success=true,nonce="a-valid-nonce-for-test-only"});
+   if(path is "device/challenge" or "offline/challenge")return Json(new{success=true,nonce="a-valid-nonce-for-test-only"});
+   if(path=="offline/refresh"){var signed=tests.Envelope(tests.Lease(Permanent));return Json(new{success=true,licenseKey="CLC-AAAA-BBBB-CCCC-DDDD",signedPayload=signed.SignedPayload,signature=signed.Signature});}
    if(path=="license/refresh"){Check(body.RootElement.GetProperty("signature").GetString()=="device-signature");Check(body.RootElement.GetProperty("nonce").GetString()=="a-valid-nonce-for-test-only");}
    var env=tests.Envelope(tests.Lease(Permanent));return Json(new{success=true,signedPayload=env.SignedPayload,signature=env.Signature,lease=new{version=999}});
   }
