@@ -35,7 +35,7 @@ sealed partial class Tests
    var c=new FakeClock();var st=OfflineStore(c);st.Write<TrustedTimeState?>("trusted-time.dat",null);
    var api=new FakeApi(this);var m=Manager(api,st,c);await m.InitializeAsync();
    Check(m.Context.State==LicenseState.Active&&api.Paths.SequenceEqual(new[]{"offline/challenge","offline/refresh"}));
-   Check(st.Read<SavedLicense>("license.dat") is not null);
+   Check(st.Read<OfflineActivationRecord>("offline-license.dat") is not null&&st.Read<SavedLicense>("license.dat") is null);
   });
   await Test("Missing checkpoint and offline network keep time error not invalid signature",async()=>{
    var c=new FakeClock();var st=OfflineStore(c);st.Write<TrustedTimeState?>("trusted-time.dat",null);
@@ -47,6 +47,25 @@ sealed partial class Tests
    st.Write("offline-license.dat",record with{Lease=record.Lease with{ServerTime=clock.Now.AddHours(1),IssuedAt=clock.Now.AddHours(1)}});
    st.Write<TrustedTimeState?>("trusted-time.dat",null);
    var m=Manager(new FakeApi(this),st,c);await m.InitializeAsync();Check(m.Context.State==LicenseState.Active);
+  });
+  await Test("Offline recovery preserves total expiry instead of a 72-hour online lease",async()=>{
+   var c=new FakeClock();var st=OfflineStore(c);st.Write<TrustedTimeState?>("trusted-time.dat",null);
+   var m=Manager(new FakeApi(this){Permanent=false},st,c);await m.InitializeAsync();
+   Check(m.Context.Lease!.ExpiresAt==Lease().LicenseExpiresAt&&m.Context.Lease.RenewalProtocol=="offline-v2");
+   c.Boot="after-recovery";c.Now+=TimeSpan.FromDays(4);c.Elapsed=TimeSpan.FromMinutes(1);
+   var api=new FakeApi(this){Offline=true};var restarted=Manager(api,st,c);await restarted.InitializeAsync();
+   Check(restarted.Context.State==LicenseState.Active&&api.Paths.Count==0);
+  });
+  await Test("DPAPI offline record and checkpoint survive upgrade-style reconstruction",async()=>{
+   var c=new FakeClock();var st=OfflineStore(c);var folder=Path.Combine(root,"encrypted-offline");
+   var disk=new ProtectedStore(folder);disk.Write("offline-license.dat",st.Read<OfflineActivationRecord>("offline-license.dat"));
+   disk.Write("trusted-time.dat",st.Read<TrustedTimeState>("trusted-time.dat"));
+   c.Boot="new-boot";c.Now+=TimeSpan.FromHours(2);c.Elapsed=TimeSpan.FromMinutes(1);
+   var api=new FakeApi(this){Offline=true};
+   var m=new LicenseManager(new LicenseApi(new(),api),verifier,new FakeDevice(),new ProtectedStore(folder),c,log);
+   await m.InitializeAsync();m.Checkpoint();Check(m.Context.State==LicenseState.Active&&api.Paths.Count==0);
+   var again=new LicenseManager(new LicenseApi(new(),api),verifier,new FakeDevice(),new ProtectedStore(folder),c,log);
+   await again.InitializeAsync();Check(again.Context.State==LicenseState.Active);
   });
   await Test("Offline expiry never keeps a misleading active countdown",async()=>{
    var c=new FakeClock();var st=OfflineStore(c);c.Boot="second";c.Now+=TimeSpan.FromDays(8);

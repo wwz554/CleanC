@@ -77,7 +77,7 @@ public sealed class LicenseManager
     var response=await api.Post("offline/refresh",new{deviceId=device.DeviceId,nonce,signature=device.Sign(nonce),appVersion="1.7.1"},token);
     var licenseKey=response.TryGetProperty("licenseKey",out var keyElement)?keyElement.GetString():null;
     if(string.IsNullOrWhiteSpace(licenseKey))throw new LicenseException("INVALID_REFRESH","服务器未返回绑定授权信息。");
-    Accept(LicenseApi.Envelope(response),licenseKey);
+    AcceptOfflineValidation(LicenseApi.Envelope(response));
   }catch(LicenseException e){
    LastError=e.Message;
    LicenseState? state=e.Code switch{
@@ -115,6 +115,20 @@ public sealed class LicenseManager
   }
  }
  void ScheduleRetry()=>nextRetry=clock.Uptime+TimeSpan.FromMinutes(failures switch{1=>1,2=>5,3=>15,_=>60});
+ void AcceptOfflineValidation(SignedEnvelope envelope)
+ {
+  var proof=verifier.VerifyLease(envelope,device.DeviceId);
+  // Revalidating an offline license must not silently replace its full authorized
+  // lifetime with a short online-renewal lease. The signed server expiry/features
+  // remain authoritative; only the local offline storage contract is retained.
+  var lease=proof with{RenewalProtocol="offline-v2",LeaseHours=0,ExpiresAt=proof.LicenseExpiresAt??DateTimeOffset.MaxValue};
+  var newTime=new TrustedTimeService(clock);newTime.Accept(lease);
+  var next=new OfflineActivationRecord(lease);
+  store.Write("trusted-time.dat",newTime.Snapshot(lease));store.Write("offline-license.dat",next);
+  offline=next;time.Accept(lease);Context.Lease=lease;Context.ForcedState=null;
+  failures=0;expiryAttempted=false;nextRetry=TimeSpan.Zero;lastCheckpoint=clock.Uptime;LastError="";
+  log.Write("Licensing","OfflineValidation","Accepted",detail:lease.LicenseType);
+ }
  void Accept(SignedEnvelope envelope,string key)
  {
   var lease=verifier.VerifyLease(envelope,device.DeviceId);
