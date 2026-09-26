@@ -669,9 +669,9 @@ $result=Get-CimInstance Win32_PnPEntity | Where-Object {
    progress?.Report(new(18,"正在下载官方驱动包"));
    downloader=session.CreateUpdateDownloader();downloader.Updates=collection;
    var download=downloader.Download();var code=SafeInt(()=>download.ResultCode);
-   dynamic? perUpdate=null;var perCode=0;var perHResult=0;
-   try{perUpdate=download.GetUpdateResult(0);perCode=SafeInt(()=>perUpdate.ResultCode);perHResult=SafeInt(()=>perUpdate.HResult);}catch{}
-   var ok=DriverOperationStatus.IsSuccess(code,perCode,perHResult);
+   dynamic? perUpdate=null;var perCode=0;var perHResult=unchecked((int)0x80004005);var overallHResult=unchecked((int)0x80004005);
+   try{overallHResult=Convert.ToInt32(download.HResult,CultureInfo.InvariantCulture);perUpdate=download.GetUpdateResult(0);perCode=Convert.ToInt32(perUpdate.ResultCode,CultureInfo.InvariantCulture);perHResult=Convert.ToInt32(perUpdate.HResult,CultureInfo.InvariantCulture);}catch{}
+   var ok=DriverOperationStatus.IsSuccess(code,perCode,perHResult,overallHResult);
    progress?.Report(new(ok?100:0,ok?"下载完成":"下载失败"));
    var resultCode=ok?2:(perCode!=0?perCode:code);
    return new(ok,ok?"官方驱动包下载完成。":code==3||perCode==3?$"驱动下载部分完成但包含错误（overall={code}, update={perCode}, hresult=0x{perHResult:X8}）。":$"驱动下载失败（overall={code}, update={perCode}, hresult=0x{perHResult:X8}）。",resultCode);
@@ -712,11 +712,11 @@ $result=Get-CimInstance Win32_PnPEntity | Where-Object {
    collection=Activator.CreateInstance(collType)!;collection.Add(target);
    progress?.Report(new(28,"正在安装驱动"));
    installer=session.CreateUpdateInstaller();installer.Updates=collection;
-   var installed=installer.Install();var code=SafeInt(()=>installed.ResultCode);var restart=SafeBool(()=>installed.RebootRequired);
-   dynamic? perUpdate=null;var perCode=0;var perHResult=0;var perRestart=false;
-   try{perUpdate=installed.GetUpdateResult(0);perCode=SafeInt(()=>perUpdate.ResultCode);perHResult=SafeInt(()=>perUpdate.HResult);perRestart=SafeBool(()=>perUpdate.RebootRequired);}catch{}
+   var installed=installer.Install();var code=SafeInt(()=>installed.ResultCode);var restart=true;
+   dynamic? perUpdate=null;var perCode=0;var perHResult=unchecked((int)0x80004005);var overallHResult=unchecked((int)0x80004005);var perRestart=false;
+   try{restart=Convert.ToBoolean(installed.RebootRequired,CultureInfo.InvariantCulture);overallHResult=Convert.ToInt32(installed.HResult,CultureInfo.InvariantCulture);perUpdate=installed.GetUpdateResult(0);perCode=Convert.ToInt32(perUpdate.ResultCode,CultureInfo.InvariantCulture);perHResult=Convert.ToInt32(perUpdate.HResult,CultureInfo.InvariantCulture);perRestart=Convert.ToBoolean(perUpdate.RebootRequired,CultureInfo.InvariantCulture);}catch{perHResult=unchecked((int)0x80004005);perRestart=true;}
    restart|=perRestart;
-   var success=DriverOperationStatus.IsSuccess(code,perCode,perHResult);string packageNote="";
+   var success=DriverOperationStatus.IsSuccess(code,perCode,perHResult,overallHResult);string packageNote="";
    if(success)
    {
     progress?.Report(new(90,"正在保存驱动安装程序副本"));

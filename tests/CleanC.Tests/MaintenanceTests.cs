@@ -111,6 +111,7 @@ sealed partial class Tests
   });
   await Test("Driver overall and individual outcomes both must fully succeed",()=>{
    Check(DriverOperationStatus.IsSuccess(2,2,0));Check(!DriverOperationStatus.IsSuccess(3,2,0));Check(!DriverOperationStatus.IsSuccess(2,3,0));Check(!DriverOperationStatus.IsSuccess(2,2,unchecked((int)0x80004005)));Check(!DriverOperationStatus.IsSuccess(2,0,0));
+   Check(!DriverOperationStatus.IsSuccess(2,2,0,unchecked((int)0x80004005)));
   });
   await Test("Driver backup validates target INF and all payloads",()=>{
    var dir=NewDriverFixture();Check(DriverBackupIntegrity.Verify(dir,Path.Combine(dir,"test.inf"),out _));

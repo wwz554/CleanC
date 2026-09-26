@@ -5,7 +5,7 @@ namespace CleanC.Repair;
 
 public static class DriverOperationStatus
 {
- public static bool IsSuccess(int overall,int individual,int hresult)=>overall==2&&individual==2&&hresult>=0;
+ public static bool IsSuccess(int overall,int individual,int hresult,int overallHresult=0)=>overall==2&&individual==2&&hresult>=0&&overallHresult>=0;
 }
 public static class DriverBackupIntegrity
 {

@@ -523,17 +523,17 @@ public sealed partial class MainWindow
      {
       if(backup is not null)
       {
-       if(result.Success&&result.RequiresRestart)
+       if(result.RequiresRestart)
         services.Drivers.MarkBackupPendingRestart(backup,"新驱动安装成功但 Windows 要求重启；重启后重新扫描且设备正常才解除保护");
        else services.Drivers.ReleaseBackupProtection(backup,result.Success
         ?"新驱动安装成功且无需重启，重新检测正常"
         :"新驱动安装未成功，但原驱动仍正常，不再需要故障回退保护");
       }
-      if(!(result.Success&&result.RequiresRestart))driverRollbackCandidates.Remove(device.DeviceId);
+      if(!result.RequiresRestart)driverRollbackCandidates.Remove(device.DeviceId);
       SetStatus(backup is null
        ?$"{device.Name} {(result.Success?"升级完成":"升级未完成，但原驱动仍正常")} · 本次没有 CleanC 本地备份。"
-       :result.Success&&result.RequiresRestart
-        ?$"{device.Name} 安装完成并需要重启 · 更新前备份继续受保护，重启后复检正常才会转入安全清理。"
+       :result.RequiresRestart
+        ?$"{device.Name} 安装流程已结束，Windows 要求重启或重启状态未确认 · 更新前备份继续受保护，请重启后复检。"
         :$"{device.Name} {(result.Success?"升级完成":"升级未完成，但原驱动仍正常")} · 备份已转入安全清理，可由用户选择删除。");
      }
      else if(result.Success&&result.RequiresRestart)SetStatus($"{device.Name} 安装完成，需要重启后完全生效。");
