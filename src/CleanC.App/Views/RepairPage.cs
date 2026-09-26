@@ -7,7 +7,7 @@ public sealed partial class MainWindow
 {
  RepairAction repairUiAction=RepairAction.FullRepair;double repairUiPercent;string repairUiStatus="准备就绪",repairUiResult="";
  int repairUiWorkflowCount;
- bool RepairBackgroundWorkRunning=>services.Repair.IsRunning||Volatile.Read(ref repairUiWorkflowCount)>0;
+ bool RepairBackgroundWorkRunning=>services.Repair.IsRunning||Volatile.Read(ref repairUiWorkflowCount)>0||ComponentWorkRunning;
  ProgressBar? repairBar;TextBlock? repairPercentText,repairStatusText;TextBox? repairResultBox;Button? repairRunButton;ComboBox? repairSelector;UIElement? repairViewCache;
 
  void ShowRepair()
@@ -22,15 +22,16 @@ public sealed partial class MainWindow
   repairStatusText=Ui.T(repairUiStatus,13,true);repairPercentText=Ui.T($"{repairUiPercent:0}%",13,true,Ui.Accent);
   repairBar=new ProgressBar{Minimum=0,Maximum=100,Value=repairUiPercent,Height=8,HorizontalAlignment=HorizontalAlignment.Stretch};
   var running=RepairBackgroundWorkRunning;repairBar.Visibility=running?Visibility.Visible:repairUiPercent>0?Visibility.Visible:Visibility.Collapsed;repairPercentText.Visibility=repairBar.Visibility;
-  repairRunButton=Ui.Button(RepairCommands.Get(repairUiAction).ChangesSystem?"开始修复":"开始检查",()=>{},true);
+  repairRunButton=Ui.Button(repairUiAction==RepairAction.FullRepair?"一键修复并复检":RepairCommands.Get(repairUiAction).ChangesSystem?"开始修复":"开始检查",()=>{},true);
   repairSelector.IsEnabled=!running;repairRunButton.IsEnabled=!running;
   repairSelector.SelectionChanged+=(_,_)=>{
    if(repairSelector.SelectedItem is not ComboBoxItem item||item.Tag is not RepairAction action)return;
-   repairUiAction=action;if(!RepairBackgroundWorkRunning&&repairRunButton is not null)repairRunButton.Content=RepairCommands.Get(action).ChangesSystem?"开始修复":"开始检查";
+   repairUiAction=action;if(!RepairBackgroundWorkRunning&&repairRunButton is not null)repairRunButton.Content=action==RepairAction.FullRepair?"一键修复并复检":RepairCommands.Get(action).ChangesSystem?"开始修复":"开始检查";
   };
   repairRunButton.Click+=async(_,_)=>await Guard(RunRepairFromUi);
   var info=Ui.Columns(-1,-1,-1);Ui.Add(info,Ui.Card(Ui.Stack(12,Ui.Icon("\uE7F4",24),Ui.T("Windows 映像",17,true),Ui.T("Microsoft DISM + ImageHealthState",12,false,Ui.Muted)),new Thickness(20)),0);Ui.Add(info,Ui.Card(Ui.Stack(12,Ui.Icon("\uE73E",24),Ui.T("系统文件",17,true),Ui.T("Microsoft SFC + 二次验证",12,false,Ui.Muted)),new Thickness(20)),1);Ui.Add(info,Ui.Card(Ui.Stack(12,Ui.Icon("\uEDA2",24),Ui.T("磁盘文件系统",17,true),Ui.T("Microsoft CHKDSK 官方退出码",12,false,Ui.Muted)),new Thickness(20)),2);
-  repairViewCache=Ui.Stack(24,Heading("WINDOWS HEALTH","系统修复","检查和修复在后台运行，可与 C 盘扫描同时进行。"),info,Ui.GlassCard(Ui.Stack(16,repairSelector,description,repairRunButton,repairStatusText,repairBar,repairPercentText,repairResultBox)));
+  var advanced=new Expander{Header="高级选项 · 单独检查或修复",Content=repairSelector,HorizontalAlignment=HorizontalAlignment.Stretch};
+  repairViewCache=Ui.Stack(24,Heading("WINDOWS HEALTH","系统修复","一键检查、修复并复检；遇到无法自动处理的问题会明确说明下一步。"),info,Ui.GlassCard(Ui.Stack(16,description,repairRunButton,repairStatusText,repairBar,repairPercentText,repairResultBox,advanced)));
   pageHost.Content=repairViewCache;
  }
 

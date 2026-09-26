@@ -18,7 +18,7 @@ public sealed record DriverUpdateCandidate(
  string Version,DateTimeOffset? DriverDate,bool RequiresRestart);
 public sealed record DriverDevice(
  string DeviceId,string Name,string DeviceClass,string Manufacturer,string Provider,string DriverVersion,DateTimeOffset? DriverDate,
- string HardwareId,string InfName,bool IsSigned,int ProblemCode,string ProblemText,DriverUpdateCandidate? Update,string? OfficialSupportUrl)
+ string HardwareId,string InfName,bool IsSigned,int ProblemCode,string ProblemText,DriverUpdateCandidate? Update,string? OfficialSupportUrl,bool OfficialCheckSucceeded=true)
 {
  public bool IsMissingDriver=>ProblemCode==28;
  public DriverHealth Health=>IsMissingDriver?DriverHealth.Missing:ProblemCode!=0?DriverHealth.Problem:Update is not null?DriverHealth.UpdateAvailable:DriverHealth.Normal;
@@ -26,7 +26,7 @@ public sealed record DriverDevice(
  public string ActionText=>Health switch{DriverHealth.Missing=>"安装",DriverHealth.Problem=>"修复安装",DriverHealth.UpdateAvailable=>"升级",_=>"驱动正常"};
  public bool CanAutoInstall=>Update is not null;
 }
-public sealed record DriverScanResult(DateTimeOffset StartedAt,DateTimeOffset EndedAt,IReadOnlyList<DriverDevice> Devices,int UpdateCount,int ProblemCount,int UnmatchedUpdateCount)
+public sealed record DriverScanResult(DateTimeOffset StartedAt,DateTimeOffset EndedAt,IReadOnlyList<DriverDevice> Devices,int UpdateCount,int ProblemCount,int UnmatchedUpdateCount,bool OfficialCheckSucceeded=true,string? OfficialCheckWarning=null)
 {
  public int NormalCount=>Devices.Count(x=>x.Health==DriverHealth.Normal);
  public int MissingCount=>Devices.Count(x=>x.Health==DriverHealth.Missing);
@@ -96,6 +96,8 @@ public sealed class DriverService(ICapabilityGate gate,AuditLog log)
   Interlocked.Increment(ref activeTasks);Interlocked.Increment(ref activeInstalls);
   try
   {
+   using var maintenance=MaintenanceLock.Enter();
+   DemandNoPendingRestart();
    log.Write("Drivers","Install","Started",updateId);
    var result=await Task.Run(()=>InstallDownloadedCore(updateId,deviceId,deviceName,progress,token),token).ConfigureAwait(false);
    log.Write("Drivers","Install",result.Success?"Completed":"Failed",updateId,$"code={result.ResultCode}; restart={result.RequiresRestart}; {result.Message}");
@@ -115,14 +117,15 @@ public sealed class DriverService(ICapabilityGate gate,AuditLog log)
    {
     var raw=ReadLocalDrivers(token).FirstOrDefault(x=>x.DeviceId.Equals(previous.DeviceId,StringComparison.OrdinalIgnoreCase));
     if(raw is null)return null;
-    DriverUpdateCandidate? update=previous.Update;
+    DriverUpdateCandidate? update=previous.Update;var officialCheckSucceeded=true;
     try{update=BestUpdate(raw,SearchOfficialDriverUpdates(token));}
     catch(Exception e)when(e is InvalidOperationException or COMException or PlatformNotSupportedException)
     {
      // Online verification is unknown, not "no update". Preserve the last known official candidate.
      log.Write("Drivers","VerifyOfficialUpdate","Unavailable",raw.DeviceId,e.Message);
+     officialCheckSucceeded=false;
     }
-    return new DriverDevice(raw.DeviceId,raw.Name,raw.DeviceClass,raw.Manufacturer,raw.Provider,raw.DriverVersion,raw.DriverDate,raw.HardwareId,raw.InfName,raw.IsSigned,raw.ProblemCode,raw.ProblemText,update,OfficialSupportUrl(raw.Manufacturer,raw.Provider));
+    return new DriverDevice(raw.DeviceId,raw.Name,raw.DeviceClass,raw.Manufacturer,raw.Provider,raw.DriverVersion,raw.DriverDate,raw.HardwareId,raw.InfName,raw.IsSigned,raw.ProblemCode,raw.ProblemText,update,OfficialSupportUrl(raw.Manufacturer,raw.Provider),officialCheckSucceeded);
    },token).ConfigureAwait(false);
    return verified;
   }
@@ -137,6 +140,7 @@ public sealed class DriverService(ICapabilityGate gate,AuditLog log)
   Interlocked.Increment(ref activeTasks);Interlocked.Increment(ref activeInstalls);
   try
   {
+   using var maintenance=MaintenanceLock.Enter();
    log.Write("Drivers","Backup","Started",device.DeviceId,$"{device.DriverVersion}; {device.InfName}");
    var result=await Task.Run(()=>BackupCurrentDriverCore(device,progress,token),token).ConfigureAwait(false);
    log.Write("Drivers","Backup",result.Success?"Completed":"Failed",device.DeviceId,result.Message);
@@ -271,6 +275,8 @@ public sealed class DriverService(ICapabilityGate gate,AuditLog log)
   Interlocked.Increment(ref activeTasks);Interlocked.Increment(ref activeInstalls);
   try
   {
+   using var maintenance=MaintenanceLock.Enter();
+   DemandNoPendingRestart();
    log.Write("Drivers","BackupRestore","Started",backup.DeviceId,$"{backup.DriverVersion}; {backup.BackupInfPath}");
    var result=await Task.Run(()=>RestoreBackupCore(backup,progress,token),token).ConfigureAwait(false);
    log.Write("Drivers","BackupRestore",result.Success?"Completed":"Failed",backup.DeviceId,result.Message);
@@ -289,6 +295,8 @@ public sealed class DriverService(ICapabilityGate gate,AuditLog log)
   Interlocked.Increment(ref activeTasks);Interlocked.Increment(ref activeInstalls);
   try
   {
+   using var maintenance=MaintenanceLock.Enter();
+   DemandNoPendingRestart();
    log.Write("Drivers","Rollback","Started",deviceId,deviceName);
    var result=await Task.Run(()=>RollbackCore(deviceId,progress,token),token).ConfigureAwait(false);
    log.Write("Drivers","Rollback",result.Success?"Completed":"Failed",deviceId,result.Message);
@@ -305,11 +313,12 @@ public sealed class DriverService(ICapabilityGate gate,AuditLog log)
   var local=ReadLocalDrivers(token);
   token.ThrowIfCancellationRequested();
   progress?.Report(new(24,$"已识别 {local.Count:N0} 个硬件设备 · 正在检查官方驱动"));
-  List<DriverUpdateCandidate> updates;
+  List<DriverUpdateCandidate> updates;string? warning=null;
   try{updates=SearchOfficialDriverUpdates(token);}
   catch(Exception e)when(e is InvalidOperationException or COMException or PlatformNotSupportedException)
   {
    updates=[];log.Write("Drivers","OfficialUpdateSearch","Unavailable",detail:e.Message);
+   warning="已完成本机检测，但未能检查官方更新。请检查网络与 Windows Update 服务后重新扫描；不能据此判断驱动已是最新。";
    progress?.Report(new(58,$"已识别 {local.Count:N0} 个硬件设备 · 官方在线检查暂不可用"));
   }
   token.ThrowIfCancellationRequested();
@@ -325,8 +334,8 @@ public sealed class DriverService(ICapabilityGate gate,AuditLog log)
   }
   devices=devices.OrderBy(x=>x.Health==DriverHealth.Missing?0:x.Health==DriverHealth.Problem?1:x.Health==DriverHealth.UpdateAvailable?2:3).ThenBy(x=>x.DeviceClass,StringComparer.OrdinalIgnoreCase).ThenBy(x=>x.Name,StringComparer.OrdinalIgnoreCase).ToList();
   var updateCount=devices.Count(x=>x.Update is not null);var problemCount=devices.Count(x=>x.Health is DriverHealth.Problem or DriverHealth.Missing);var unmatched=updates.Count(x=>!used.Contains(x.UpdateId));
-  progress?.Report(new(100,$"扫描完成 · {devices.Count:N0} 个驱动 · {updateCount:N0} 个可更新"));
-  return new(started,DateTimeOffset.UtcNow,devices,updateCount,problemCount,unmatched);
+  progress?.Report(new(100,warning??$"扫描完成 · {devices.Count:N0} 个驱动 · {updateCount:N0} 个可更新"));
+  return new(started,DateTimeOffset.UtcNow,devices,updateCount,problemCount,unmatched,warning is null,warning);
  }
 
  List<RawDevice> ReadLocalDrivers(CancellationToken token)
@@ -337,7 +346,8 @@ public sealed class DriverService(ICapabilityGate gate,AuditLog log)
    if(viaPs.Count>0){log.Write("Drivers","LocalInventory","PowerShell",detail:$"{viaPs.Count} devices");return viaPs;}
    log.Write("Drivers","LocalInventory","PowerShellEmpty");
   }
-  catch(Exception e){log.Write("Drivers","LocalInventory","PowerShellFallback",detail:e.Message);}
+  catch(Exception e)when(e is not OperationCanceledException){log.Write("Drivers","LocalInventory","PowerShellFallback",detail:e.Message);}
+  token.ThrowIfCancellationRequested();
   var viaWmi=ReadLocalDriversWmi(token);
   if(viaWmi.Count>0){log.Write("Drivers","LocalInventory","WMI",detail:$"{viaWmi.Count} devices");return viaWmi;}
   throw new InvalidOperationException("没有枚举到任何 PnP 硬件。请确认 Windows Management Instrumentation (WMI) 服务正常后重试。");
@@ -384,7 +394,7 @@ $result=Get-CimInstance Win32_PnPEntity | Where-Object {
   var psi=new ProcessStartInfo{FileName=shell,Arguments=$"-NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}",UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true,StandardOutputEncoding=Encoding.UTF8,StandardErrorEncoding=Encoding.UTF8};
   using var process=Process.Start(psi)??throw new InvalidOperationException("无法启动 PowerShell 硬件枚举。");
   var outputTask=process.StandardOutput.ReadToEndAsync();var errorTask=process.StandardError.ReadToEndAsync();
-  while(!process.WaitForExit(150)){token.ThrowIfCancellationRequested();}
+  WaitForReadOnlyProcess(process,token);
   var json=outputTask.GetAwaiter().GetResult();var stderr=errorTask.GetAwaiter().GetResult();
   if(process.ExitCode!=0)throw new InvalidOperationException(string.IsNullOrWhiteSpace(stderr)?"PowerShell 硬件枚举失败。":stderr.Trim());
   if(string.IsNullOrWhiteSpace(json)||json.Trim()=="[]")return [];
@@ -456,6 +466,7 @@ $result=Get-CimInstance Win32_PnPEntity | Where-Object {
   {
    session.ClientApplicationID="CleanC Driver Repair";searcher=session.CreateUpdateSearcher();searcher.Online=true;searcher.IncludePotentiallySupersededUpdates=false;
    result=searcher.Search("IsInstalled=0 and Type='Driver' and IsHidden=0");dynamic r=result;var list=new List<DriverUpdateCandidate>();
+   if((int)r.ResultCode!=2)throw new InvalidOperationException($"官方驱动查询未完整成功（结果 {(int)r.ResultCode}），请重试。");
    for(var i=0;i<(int)r.Updates.Count;i++)
    {
     token.ThrowIfCancellationRequested();dynamic u=r.Updates.Item(i);
@@ -500,7 +511,7 @@ $result=Get-CimInstance Win32_PnPEntity | Where-Object {
   using var process=Process.Start(psi);
   if(process is null){TryDeleteDirectory(folder);return new(false,null,"无法启动 Windows PnPUtil，已取消升级。",2);}
   var stdout=process.StandardOutput.ReadToEndAsync();var stderr=process.StandardError.ReadToEndAsync();
-  while(!process.WaitForExit(150)){token.ThrowIfCancellationRequested();}
+  WaitForReadOnlyProcess(process,token);
   var output=stdout.GetAwaiter().GetResult();var error=stderr.GetAwaiter().GetResult();
   if(process.ExitCode!=0)
   {
@@ -511,7 +522,7 @@ $result=Get-CimInstance Win32_PnPEntity | Where-Object {
 
   var files=Directory.EnumerateFiles(folder,"*",SearchOption.AllDirectories).ToList();
   var inf=files.FirstOrDefault(x=>x.EndsWith(".inf",StringComparison.OrdinalIgnoreCase));
-  var payloadCount=files.Count(x=>!x.EndsWith(".inf",StringComparison.OrdinalIgnoreCase));
+  var payloadCount=files.Count(x=>!x.EndsWith(".inf",StringComparison.OrdinalIgnoreCase)&&!DriverBackupIntegrity.IsMetadata(x));
   if(string.IsNullOrWhiteSpace(inf)||payloadCount==0)
   {
    TryDeleteDirectory(folder);
@@ -533,13 +544,13 @@ $result=Get-CimInstance Win32_PnPEntity | Where-Object {
   var backupRoot=Path.GetFullPath(AppPaths.DriverBackups).TrimEnd('\\');
   var directory=Path.GetFullPath(backup.BackupDirectory).TrimEnd('\\');
   var inf=Path.GetFullPath(backup.BackupInfPath);
-  if(!SafetyPolicy.Within(directory,backupRoot)||!SafetyPolicy.Within(inf,backupRoot))
+  if(!SafetyPolicy.Within(directory,backupRoot)||directory.Equals(backupRoot,StringComparison.OrdinalIgnoreCase)||!SafetyPolicy.Within(inf,directory))
    return new(false,false,"备份路径不在 CleanC DriverBackups 目录中，拒绝恢复。",5);
   if(!Directory.Exists(directory)||!File.Exists(inf))
    return new(false,false,"更新前驱动备份已经不存在，无法恢复。",2);
   if(string.IsNullOrWhiteSpace(backup.HardwareId))
    return new(false,false,"驱动备份缺少硬件 ID，无法安全恢复。",87);
-  if(!VerifyBackupHashManifest(directory,out var integrityError))
+  if(!DriverBackupIntegrity.Verify(directory,inf,out var integrityError))
    return new(false,false,"驱动备份完整性校验失败："+integrityError,13);
 
   var allCurrent=ReadLocalDrivers(token);
@@ -643,6 +654,7 @@ $result=Get-CimInstance Win32_PnPEntity | Where-Object {
    searcher=session.CreateUpdateSearcher();searcher.Online=true;
    result=searcher.Search("IsInstalled=0 and Type='Driver' and IsHidden=0");
    dynamic r=result;dynamic? target=null;
+   if((int)r.ResultCode!=2)return new(false,"官方查询未完整成功，已停止下载，请重新扫描。",(int)r.ResultCode);
    for(var i=0;i<(int)r.Updates.Count;i++)
    {
     token.ThrowIfCancellationRequested();
@@ -657,9 +669,9 @@ $result=Get-CimInstance Win32_PnPEntity | Where-Object {
    progress?.Report(new(18,"正在下载官方驱动包"));
    downloader=session.CreateUpdateDownloader();downloader.Updates=collection;
    var download=downloader.Download();var code=SafeInt(()=>download.ResultCode);
-   dynamic? perUpdate=null;var perCode=0;var perHResult=0;
-   try{perUpdate=download.GetUpdateResult(0);perCode=SafeInt(()=>perUpdate.ResultCode);perHResult=SafeInt(()=>perUpdate.HResult);}catch{}
-   var ok=code==2&&perCode==2&&perHResult>=0;
+   dynamic? perUpdate=null;var perCode=0;var perHResult=unchecked((int)0x80004005);var overallHResult=unchecked((int)0x80004005);
+   try{overallHResult=Convert.ToInt32(download.HResult,CultureInfo.InvariantCulture);perUpdate=download.GetUpdateResult(0);perCode=Convert.ToInt32(perUpdate.ResultCode,CultureInfo.InvariantCulture);perHResult=Convert.ToInt32(perUpdate.HResult,CultureInfo.InvariantCulture);}catch{}
+   var ok=DriverOperationStatus.IsSuccess(code,perCode,perHResult,overallHResult);
    progress?.Report(new(ok?100:0,ok?"下载完成":"下载失败"));
    var resultCode=ok?2:(perCode!=0?perCode:code);
    return new(ok,ok?"官方驱动包下载完成。":code==3||perCode==3?$"驱动下载部分完成但包含错误（overall={code}, update={perCode}, hresult=0x{perHResult:X8}）。":$"驱动下载失败（overall={code}, update={perCode}, hresult=0x{perHResult:X8}）。",resultCode);
@@ -680,6 +692,7 @@ $result=Get-CimInstance Win32_PnPEntity | Where-Object {
    searcher=session.CreateUpdateSearcher();searcher.Online=true;
    result=searcher.Search("IsInstalled=0 and Type='Driver' and IsHidden=0");
    dynamic r=result;dynamic? target=null;
+   if((int)r.ResultCode!=2)return new(false,false,"官方查询未完整成功，已停止安装，请重新扫描。",(int)r.ResultCode);
    for(var i=0;i<(int)r.Updates.Count;i++)
    {
     token.ThrowIfCancellationRequested();dynamic u=r.Updates.Item(i);
@@ -699,11 +712,11 @@ $result=Get-CimInstance Win32_PnPEntity | Where-Object {
    collection=Activator.CreateInstance(collType)!;collection.Add(target);
    progress?.Report(new(28,"正在安装驱动"));
    installer=session.CreateUpdateInstaller();installer.Updates=collection;
-   var installed=installer.Install();var code=SafeInt(()=>installed.ResultCode);var restart=SafeBool(()=>installed.RebootRequired);
-   dynamic? perUpdate=null;var perCode=0;var perHResult=0;var perRestart=false;
-   try{perUpdate=installed.GetUpdateResult(0);perCode=SafeInt(()=>perUpdate.ResultCode);perHResult=SafeInt(()=>perUpdate.HResult);perRestart=SafeBool(()=>perUpdate.RebootRequired);}catch{}
+   var installed=installer.Install();var code=SafeInt(()=>installed.ResultCode);var restart=true;
+   dynamic? perUpdate=null;var perCode=0;var perHResult=unchecked((int)0x80004005);var overallHResult=unchecked((int)0x80004005);var perRestart=false;
+   try{restart=Convert.ToBoolean(installed.RebootRequired,CultureInfo.InvariantCulture);overallHResult=Convert.ToInt32(installed.HResult,CultureInfo.InvariantCulture);perUpdate=installed.GetUpdateResult(0);perCode=Convert.ToInt32(perUpdate.ResultCode,CultureInfo.InvariantCulture);perHResult=Convert.ToInt32(perUpdate.HResult,CultureInfo.InvariantCulture);perRestart=Convert.ToBoolean(perUpdate.RebootRequired,CultureInfo.InvariantCulture);}catch{perHResult=unchecked((int)0x80004005);perRestart=true;}
    restart|=perRestart;
-   var success=code==2&&perCode==2&&perHResult>=0;string packageNote="";
+   var success=DriverOperationStatus.IsSuccess(code,perCode,perHResult,overallHResult);string packageNote="";
    if(success)
    {
     progress?.Report(new(90,"正在保存驱动安装程序副本"));
@@ -724,7 +737,7 @@ $result=Get-CimInstance Win32_PnPEntity | Where-Object {
   foreach(var file in Directory.EnumerateFiles(folder,"*",SearchOption.AllDirectories))
   {
    var name=Path.GetFileName(file);
-   if(name.StartsWith("CleanC-",StringComparison.OrdinalIgnoreCase)||name.Equals("备份说明.txt",StringComparison.OrdinalIgnoreCase))continue;
+   if(DriverBackupIntegrity.IsMetadata(file))continue;
    var relative=Path.GetRelativePath(folder,file);
    using var stream=File.OpenRead(file);manifest[relative]=Convert.ToHexString(SHA256.HashData(stream));
   }
@@ -759,7 +772,8 @@ $result=Get-CimInstance Win32_PnPEntity | Where-Object {
    var pnputil=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),"pnputil.exe");
    var psi=new ProcessStartInfo{FileName=pnputil,Arguments=$"/export-driver \"{device.InfName}\" \"{folder}\"",UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true};
    using var process=Process.Start(psi);if(process is null)return null;
-   while(!process.WaitForExit(150)){token.ThrowIfCancellationRequested();}
+   var stdout=process.StandardOutput.ReadToEndAsync();var stderr=process.StandardError.ReadToEndAsync();
+   WaitForReadOnlyProcess(process,token);stdout.GetAwaiter().GetResult();stderr.GetAwaiter().GetResult();
    if(process.ExitCode!=0){try{Directory.Delete(folder,true);}catch{}return null;}
    File.WriteAllText(Path.Combine(folder,"CleanC-驱动安装程序.txt"),$"设备：{device.Name}\n厂商：{device.Manufacturer}\n提供方：{device.Provider}\n版本：{device.DriverVersion}\nINF：{device.InfName}\n保存时间：{DateTime.Now:yyyy-MM-dd HH:mm:ss}\n\n这是已安装驱动包的副本，可以在 CleanC 安全清理中删除。\n");
    log.Write("Drivers","PackageExport","Completed",folder,$"{device.InfName}; {device.DriverVersion}");
@@ -770,6 +784,27 @@ $result=Get-CimInstance Win32_PnPEntity | Where-Object {
  static string SafeFileName(string value)
  {
   var invalid=Path.GetInvalidFileNameChars();var chars=(value??"driver").Select(c=>invalid.Contains(c)?'_':c).ToArray();var text=new string(chars).Trim();return string.IsNullOrWhiteSpace(text)?"driver":text.Length>60?text[..60]:text;
+ }
+ static void DemandNoPendingRestart()
+ {
+  if(WindowsMaintenanceState.RestartPending!=false)throw new InvalidOperationException("Windows 待重启或无法确认重启状态，请先重启后再安装/回退驱动。");
+ }
+ static void WaitForReadOnlyProcess(Process process,CancellationToken token)
+ {
+  var watch=Stopwatch.StartNew();
+  try
+  {
+   while(!process.WaitForExit(150))
+   {
+    token.ThrowIfCancellationRequested();
+    if(watch.Elapsed>TimeSpan.FromMinutes(5))throw new TimeoutException("硬件枚举或驱动导出超时，未继续安装。");
+   }
+  }
+  catch
+  {
+   try{if(!process.HasExited){process.Kill(entireProcessTree:true);process.WaitForExit(5000);}}catch{}
+   throw;
+  }
  }
 
  static DriverUpdateCandidate? BestUpdate(RawDevice device,IReadOnlyList<DriverUpdateCandidate> updates)

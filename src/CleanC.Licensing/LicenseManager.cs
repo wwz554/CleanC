@@ -28,7 +28,7 @@ public sealed class LicenseManager
     if(offline is null)return;
     var lease=offline.Lease;
     if(lease.DeviceId!=device.DeviceId||lease.RenewalProtocol!="offline-v2"||lease.ExpiresAt!=(lease.LicenseExpiresAt??DateTimeOffset.MaxValue)||lease.IsPermanent!=(lease.LicenseType=="permanent"))throw new CryptographicException("离线记录无效。");
-    Context.Lease=lease;time.Restore(lease,store.Read<TrustedTimeState>("trusted-time.dat"));return;
+    Context.Lease=lease;Context.ForcedState=offline.Lock;time.Restore(lease,store.Read<TrustedTimeState>("trusted-time.dat"));return;
    }
    Context.Lease=verifier.VerifyLease(saved.Envelope,device.DeviceId);Context.ForcedState=saved.Lock;
    time.Restore(Context.Lease,store.Read<TrustedTimeState>("trusted-time.dat"));
@@ -49,8 +49,11 @@ public sealed class LicenseManager
    if(Context.State==LicenseState.Active)throw new LicenseException("ALREADY_ACTIVE","当前授权仍有效，请勿覆盖。");
    // Expired binding must be released through proof of possession before switching keys.
    if(saved is not null&&Context.Lease is {} old&&old.LicenseExpiresAt is {} end&&time.Now>=end)await RefreshCore(token);
+   if(saved is null&&offline is not null&&Context.Lease?.LicenseExpiresAt is {} offlineEnd&&time.Now>=offlineEnd){
+    try{await RefreshOfflineCore(token);}catch(LicenseException e)when(e.Code is "LICENSE_EXPIRED_RELEASED" or "DEVICE_NOT_BOUND"){}
+   }
    Context.ForcedState=LicenseState.Activating;
-   var response=await api.Post(LicenseEndpoints.Activate,new {licenseKey=key,deviceId=device.DeviceId,devicePublicKey=device.PublicKeyPem,deviceName="Windows PC",windowsVersion=Environment.OSVersion.VersionString,appVersion="1.6.8"},token);
+   var response=await api.Post(LicenseEndpoints.Activate,new {licenseKey=key,deviceId=device.DeviceId,devicePublicKey=device.PublicKeyPem,deviceName="Windows PC",windowsVersion=Environment.OSVersion.VersionString,appVersion="1.7.0"},token);
    Accept(LicenseApi.Envelope(response),key);
   }catch{if(Context.ForcedState==LicenseState.Activating)Context.ForcedState=oldState;throw;}
   finally{mutex.Release();}
@@ -59,15 +62,29 @@ public sealed class LicenseManager
  {
   if(saved is null&&offline is null)throw new LicenseException("NO_LICENSE","请先输入授权码激活。");
   await mutex.WaitAsync(token);try{
-   if(saved is null){
+   if(saved is null)await RefreshOfflineCore(token);else await RefreshCore(token);
+  }finally{mutex.Release();}
+ }
+ async Task RefreshOfflineCore(CancellationToken token)
+ {
+  try{
     var challenge=await api.Post("offline/challenge",new{deviceId=device.DeviceId},token);
     var nonce=challenge.GetProperty("nonce").GetString()??"";
-    var response=await api.Post("offline/refresh",new{deviceId=device.DeviceId,nonce,signature=device.Sign(nonce),appVersion="1.6.8"},token);
+    var response=await api.Post("offline/refresh",new{deviceId=device.DeviceId,nonce,signature=device.Sign(nonce),appVersion="1.7.0"},token);
     var licenseKey=response.TryGetProperty("licenseKey",out var keyElement)?keyElement.GetString():null;
     if(string.IsNullOrWhiteSpace(licenseKey))throw new LicenseException("INVALID_REFRESH","服务器未返回绑定授权信息。");
     Accept(LicenseApi.Envelope(response),licenseKey);
-   }else await RefreshCore(token);
-  }finally{mutex.Release();}
+  }catch(LicenseException e){
+   LastError=e.Message;
+   LicenseState? state=e.Code switch{
+    "LICENSE_EXPIRED_RELEASED" or "LICENSE_EXPIRED"=>LicenseState.Expired,
+    "LICENSE_DISABLED"=>LicenseState.Suspended,
+    "DEVICE_NOT_BOUND" or "LICENSE_NOT_FOUND"=>LicenseState.Revoked,
+    "DEVICE_KEY_MISMATCH" or "DEVICE_MISMATCH" or "INVALID_DEVICE_SIGNATURE"=>LicenseState.DeviceMismatch,
+    "INVALID_SIGNATURE" or "INVALID_LEASE"=>LicenseState.InvalidSignature,_=>null};
+   if(state.HasValue&&offline is not null){Context.ForcedState=state;offline=offline with{Lock=state};store.Write("offline-license.dat",offline);}
+   log.Write("Licensing","OfflineRefresh","Rejected",detail:e.Code);throw;
+  }
  }
  async Task RefreshCore(CancellationToken token)
  {
@@ -75,7 +92,7 @@ public sealed class LicenseManager
   try {
    var challenge=await api.Post(LicenseEndpoints.Challenge,new {licenseKey=saved.LicenseKey,deviceId=device.DeviceId},token);
    var nonce=challenge.GetProperty("nonce").GetString()??"";
-   var response=await api.Post(LicenseEndpoints.Refresh,new{licenseKey=saved.LicenseKey,deviceId=device.DeviceId,nonce,signature=device.Sign(nonce),windowsVersion=Environment.OSVersion.VersionString,appVersion="1.6.8"},token);
+   var response=await api.Post(LicenseEndpoints.Refresh,new{licenseKey=saved.LicenseKey,deviceId=device.DeviceId,nonce,signature=device.Sign(nonce),windowsVersion=Environment.OSVersion.VersionString,appVersion="1.7.0"},token);
    Accept(LicenseApi.Envelope(response),saved.LicenseKey);
   }catch(LicenseException e) {
    LastError=e.Message; failures++;ScheduleRetry();
@@ -146,4 +163,3 @@ public sealed class LicenseManager
  }
  public Task<string> DiagnosticsAsync(CancellationToken token=default)=>api.DiagnosticsAsync(verifier,token);
 }
-

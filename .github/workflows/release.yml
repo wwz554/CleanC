@@ -1,9 +1,14 @@
 name: Build and release CleanC
 on:
   push:
-    branches: [main, development-1.6.8]
+    branches: [main, fix/production-readiness-20260923]
     paths-ignore: ['updates/**', '**.md']
+  pull_request:
+    branches: [main]
   workflow_dispatch:
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 permissions:
   contents: write
 jobs:
@@ -20,6 +25,12 @@ jobs:
         run: dotnet build CleanC.sln -c Release --no-restore
       - name: Regression tests
         run: dotnet run --project tests/CleanC.Tests -c Release --no-build
+      - name: Production public-key bootstrap smoke (read only)
+        env:
+          CLEANC_LIVE_TESTS: '1'
+        run: dotnet run --project tests/CleanC.Tests -c Release --no-build
+      - name: QR decoding regression
+        run: dotnet run --project tests/CleanC.QrTests -c Release
       - name: Publish
         run: dotnet publish src/CleanC.App/CleanC.App.csproj -c Release -p:Platform=x64 -p:WindowsAppSDKSelfContained=true -p:PublishSingleFile=false -r win-x64 --self-contained true -o artifacts/publish
       - name: Installer
@@ -30,6 +41,30 @@ jobs:
           & $iscc build/CleanC.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (-not (Test-Path artifacts/publish/CleanC.pri)) { throw 'Missing WinUI resources' }
+      - name: Installer install, reinstall and uninstall smoke (ephemeral runner only)
+        shell: pwsh
+        run: |
+          $target = Join-Path $env:RUNNER_TEMP ('CleanC-install-smoke-' + [guid]::NewGuid().ToString('N'))
+          $sentinelDirectory = Join-Path $env:LOCALAPPDATA 'CleanC'
+          New-Item -ItemType Directory -Path $sentinelDirectory -Force | Out-Null
+          $sentinel = Join-Path $sentinelDirectory 'ci-preserve-sentinel.txt'
+          'test fixture, not an authorization' | Set-Content -LiteralPath $sentinel
+          $expected = (Get-FileHash -LiteralPath $sentinel -Algorithm SHA256).Hash
+          foreach ($attempt in 1..2) {
+            $setup = Start-Process -FilePath (Resolve-Path artifacts/installer/CleanC-Setup.exe) -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',("/DIR=`"$target`"")) -WindowStyle Hidden -Wait -PassThru
+            if ($setup.ExitCode -ne 0) { throw "Installer exit $($setup.ExitCode)" }
+            if (-not (Test-Path -LiteralPath (Join-Path $target 'CleanC.pri'))) { throw 'Installed resources missing' }
+            [xml]$props = Get-Content Directory.Build.props
+            $installedVersion = (Get-Item -LiteralPath (Join-Path $target 'CleanC.exe')).VersionInfo.ProductVersion
+            if ($installedVersion.Split('+')[0] -ne [string]$props.Project.PropertyGroup.Version) { throw 'Installed version mismatch' }
+            if ((Get-FileHash -LiteralPath $sentinel -Algorithm SHA256).Hash -ne $expected) { throw 'Install altered persisted data fixture' }
+          }
+          $uninstaller = Join-Path $target 'unins000.exe'
+          if (-not (Test-Path -LiteralPath $uninstaller)) { throw 'Uninstaller missing' }
+          $uninstall = Start-Process -FilePath $uninstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART') -WindowStyle Hidden -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) { throw 'Uninstall failed' }
+          if (Test-Path -LiteralPath (Join-Path $target 'CleanC.exe')) { throw 'Uninstall left application executable' }
+          if ((Get-FileHash -LiteralPath $sentinel -Algorithm SHA256).Hash -ne $expected) { throw 'Uninstall removed persisted data fixture' }
       - uses: actions/upload-artifact@v4
         with:
           name: CleanC-Windows-x64
@@ -48,8 +83,14 @@ jobs:
           $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           gh release view $tag *> $null
           if ($LASTEXITCODE -eq 0) { throw 'Version already released; increment Version before publishing' }
-          gh release create $tag $file.FullName --title "CleanC $version" --notes 'Windows x64 release. SHA-256 checked updates; license data retained.' --target $env:GITHUB_SHA
+          gh release create $tag $file.FullName --title "CleanC $version" --notes-file "docs/Release-$version.md" --target $env:GITHUB_SHA
           if ($LASTEXITCODE -ne 0) { throw 'Release upload failed' }
+          $verification = Join-Path $env:RUNNER_TEMP ('cleanc-release-verify-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $verification | Out-Null
+          gh release download $tag --pattern 'CleanC-Setup.exe' --dir $verification
+          if ($LASTEXITCODE -ne 0) { throw 'Published asset download verification failed' }
+          $downloaded = Get-Item (Join-Path $verification 'CleanC-Setup.exe')
+          if ($downloaded.Length -ne $file.Length -or (Get-FileHash $downloaded.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hash) { throw 'Published asset does not match build; update manifest not changed' }
           New-Item -ItemType Directory -Force updates | Out-Null
           @{version=$version;url="https://github.com/wwz554/CleanC/releases/download/$tag/CleanC-Setup.exe";sha256=$hash;size=$file.Length;notes="CleanC $version"} | ConvertTo-Json | Set-Content -Encoding utf8NoBOM updates/latest.json
           git config user.name 'github-actions[bot]'

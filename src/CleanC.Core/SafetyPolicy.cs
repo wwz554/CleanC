@@ -3,7 +3,9 @@ namespace CleanC.Core;
 public sealed record CleanupRule(string Id,string Root,string Label,TimeSpan MinimumAge,string[]? Extensions=null,string? NamePrefix=null);
 public sealed class SafetyPolicy
 {
- public const string Version="2026.09.19.3";
+ public const string Version="2026.09.25.170";
+ readonly string[] systemReportRoots;
+ readonly string cbsLogs;
  readonly string windows;
  readonly string localAppData;
  readonly string roamingAppData;
@@ -22,7 +24,7 @@ public sealed class SafetyPolicy
  readonly HashSet<string> criticalRootNames=new(StringComparer.OrdinalIgnoreCase){"bootmgr","bootnxt","ntldr","ntdetect.com","boot.ini","hiberfil.sys","pagefile.sys","swapfile.sys","dumpstack.log.tmp","memory.dmp"};
  public IReadOnlyList<CleanupRule> Rules=>rules;
  public bool IsVolatileRule(string? ruleId)=>!string.IsNullOrWhiteSpace(ruleId)&&(ruleId.StartsWith("Chrome-",StringComparison.OrdinalIgnoreCase)||ruleId.StartsWith("Edge-",StringComparison.OrdinalIgnoreCase)||ruleId.StartsWith("Firefox-",StringComparison.OrdinalIgnoreCase)||ruleId.StartsWith("AppCache:",StringComparison.OrdinalIgnoreCase)||ruleId.Equals("Windows-ThumbnailCache",StringComparison.OrdinalIgnoreCase));
- static readonly HashSet<string> Sensitive=new(StringComparer.OrdinalIgnoreCase){".exe",".dll",".sys",".msi",".msix",".vhd",".vhdx",".vmdk",".vdi",".qcow2",".gguf",".safetensors",".onnx",".pt",".pth",".ckpt",".git",".db",".sqlite",".ini",".json"};
+ static readonly HashSet<string> Sensitive=new(StringComparer.OrdinalIgnoreCase){".exe",".dll",".sys",".msi",".msix",".vhd",".vhdx",".vmdk",".vdi",".qcow2",".gguf",".safetensors",".onnx",".pt",".pth",".ckpt",".git",".db",".sqlite",".sqlite3",".ini",".json",".config",".pem",".key",".pfx",".p12",".kdbx",".wallet",".env",".bak"};
  static readonly HashSet<string> UserContentExtensions=new(StringComparer.OrdinalIgnoreCase){".jpg",".jpeg",".png",".gif",".bmp",".webp",".heic",".raw",".mp4",".mkv",".mov",".avi",".wmv",".flv",".webm",".mp3",".wav",".flac",".aac",".m4a",".doc",".docx",".xls",".xlsx",".ppt",".pptx",".pdf",".txt",".rtf",".csv",".md",".markdown",".psd",".ai",".fig",".sketch",".blend",".dwg",".dxf",".sql",".cs",".cpp",".c",".h",".hpp",".py",".js",".ts",".tsx",".jsx",".java",".go",".rs",".php",".html",".css",".xml",".yaml",".yml",".toml",".ipynb",".r",".rmd",".tex",".epub",".mobi",".pages",".numbers",".key",".odt",".ods",".odp",".zip",".7z",".rar",".tar",".gz"};
  static readonly HashSet<string> CacheDirectoryNames=new(StringComparer.OrdinalIgnoreCase){"cache","caches","code cache","gpucache","dawncache","shadercache","d3dscache","grshadercache","dxcache","glcache","computecache","nv_cache","localcache","tempstate","inetcache","media cache","media cache files","httpcache","http cache","imagecache","image cache","videocache","video cache","browsercache","browser cache","web cache","cef_cache","cachedata","cache_data","thumbnailcache","thumbnail cache","tmp","temp"};
  static readonly TimeSpan RecentBrowserCacheAge=TimeSpan.FromDays(7);
@@ -41,6 +43,8 @@ public sealed class SafetyPolicy
   localProgramsRoot=Path.Combine(local,"Programs");
   var profile=Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
   var programData=Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+  systemReportRoots=[Path.Combine(programData,@"Microsoft\Windows\WER\ReportArchive"),Path.Combine(programData,@"Microsoft\Windows\WER\ReportQueue")];
+  cbsLogs=Path.Combine(windows,@"Logs\CBS");
   var systemDrive=Path.GetPathRoot(windows)!;
   var localLow=Path.Combine(profile,"AppData","LocalLow");
   localLowAppData=localLow;
@@ -116,8 +120,13 @@ public sealed class SafetyPolicy
   var list=new List<CleanupRule>{
    new("user-temp",Path.Combine(local,"Temp"),"用户临时文件",TimeSpan.FromDays(2)),
    new("windows-temp",Path.Combine(windows,"Temp"),"Windows 临时文件",TimeSpan.FromDays(3)),
+   new("windows-system-temp",Path.Combine(windows,"SystemTemp"),"系统服务临时文件",TimeSpan.FromDays(7)),
    new("crash",Path.Combine(local,"CrashDumps"),"应用崩溃转储",TimeSpan.FromDays(7),[".dmp"]),
    new("shader",Path.Combine(local,"D3DSCache"),"DirectX 着色器缓存",TimeSpan.FromDays(30)),
+   new("shader-nvidia-dx",Path.Combine(local,@"NVIDIA\DXCache"),"NVIDIA DirectX 着色器缓存",TimeSpan.FromDays(30)),
+   new("shader-nvidia-gl",Path.Combine(local,@"NVIDIA\GLCache"),"NVIDIA OpenGL 着色器缓存",TimeSpan.FromDays(30)),
+   new("shader-amd-dx",Path.Combine(local,@"AMD\DxCache"),"AMD DirectX 着色器缓存",TimeSpan.FromDays(30)),
+   new("shader-amd-dxc",Path.Combine(local,@"AMD\DxcCache"),"AMD 编译着色器缓存",TimeSpan.FromDays(30)),
    new("wer",Path.Combine(local,@"Microsoft\Windows\WER\ReportArchive"),"已归档错误报告",TimeSpan.FromDays(14)),
    new("wer-queue",Path.Combine(local,@"Microsoft\Windows\WER\ReportQueue"),"旧错误报告队列",TimeSpan.FromDays(14)),
    new("Windows-ThumbnailCache",Path.Combine(local,@"Microsoft\Windows\Explorer"),"Windows 缩略图缓存",TimeSpan.Zero,[".db"],"thumbcache_")
@@ -144,6 +153,8 @@ public sealed class SafetyPolicy
  public Classification ClassifyPath(string path,bool isDirectory)
  {
   var p=Path.GetFullPath(path).TrimEnd('\\');
+  if(IsPersistentAppState(p)||IsPersistentCacheFile(p))return new(SafetyLevel.Protected,"应用持久数据","站点离线数据、会话和数据库不是可随意删除的缓存");
+  if(TrySystemDiagnostic(p,null,DateTime.UtcNow,out var diagnostic))return diagnostic;
   if(Within(p,AppPaths.DriverBackups))return ClassifyDriverBackup(p);
   if(Within(p,AppPaths.DriverPackages))return new(SafetyLevel.Safe,"驱动安装程序","CleanC 保存的官方驱动安装包副本，可清理","cleanc-driver-package");
   if(recoveryRoots.Any(root=>Within(p,root)))return new(SafetyLevel.Protected,"系统恢复","Windows 恢复、还原点或恢复环境数据受到保护");
@@ -190,7 +201,7 @@ public sealed class SafetyPolicy
   if(File.Exists(marker))
    return new(SafetyLevel.Protected,"待回退驱动备份","该驱动升级失败、尚未确认或仍可能需要回退，暂时禁止清理");
 
-  return new(SafetyLevel.Safe,"备份的驱动","已完成升级/恢复流程的历史驱动备份，可由用户选择清理","cleanc-driver-backup");
+  return new(SafetyLevel.Optional,"备份的驱动","保留以便回退；只有确认不再需要时才手动选择清理，一键安全清理不会删除","cleanc-driver-backup");
  }
  bool IsCriticalRootItem(string path)
  {
@@ -201,9 +212,11 @@ public sealed class SafetyPolicy
  public Classification Classify(FileSnapshot f,DateTime utcNow,bool fresh=false,IDictionary<string,bool>? sessionMarkers=null)
  {
   var p=Path.GetFullPath(f.Path);var ext=Path.GetExtension(p);
+  if(IsPersistentAppState(p)||IsPersistentCacheFile(p))return new(SafetyLevel.Protected,"应用持久数据","站点离线数据、会话和数据库不是可随意删除的缓存");
+  if((f.Attributes&(FileAttributes.ReparsePoint|FileAttributes.System|FileAttributes.Offline|FileAttributes.Encrypted))!=0||f.Links>1)return new(SafetyLevel.Protected,"受保护","链接、系统属性、云端文件或硬链接");
+  if(TrySystemDiagnostic(p,f,utcNow,out var diagnostic))return diagnostic;
   if(Within(p,AppPaths.DriverBackups))return ClassifyDriverBackup(p);
   if(Within(p,AppPaths.DriverPackages))return new(SafetyLevel.Safe,"驱动安装程序","CleanC 保存的官方驱动安装包副本，可清理","cleanc-driver-package");
-  if((f.Attributes&(FileAttributes.ReparsePoint|FileAttributes.System|FileAttributes.Offline|FileAttributes.Encrypted))!=0||f.Links>1)return new(SafetyLevel.Protected,"受保护","链接、系统属性、云端文件或硬链接");
   if(recoveryRoots.Any(root=>Within(p,root)))return new(SafetyLevel.Protected,"系统恢复","Windows 恢复、还原点或恢复环境数据受到保护");
   if(TryClassifyLocalPrograms(p,false,utcNow,fresh,sessionMarkers,out var programsKind))return programsKind;
   if(protectedRoots.Any(root=>Within(p,root)))return new(SafetyLevel.Protected,"系统与应用","系统、程序、服务、凭据、云同步或应用公共数据受到保护");
@@ -215,14 +228,14 @@ public sealed class SafetyPolicy
     return new(SafetyLevel.Optional,rule.Id.Equals("Windows-ThumbnailCache",StringComparison.OrdinalIgnoreCase)?"Windows 缩略图缓存":"可重建缓存结构",
      "该文件属于会快速重新生成的缓存索引/容器；默认暂不清理，避免清理后马上再次出现",rule.Id);
    if(UserContentExtensions.Contains(ext))return new(SafetyLevel.UserData,"缓存目录中的个人文件","检测到图片、视频、文档或压缩包；即使位于缓存目录也交给用户确认",rule.Id);
-   if((!IsVolatileRule(rule.Id)&&Sensitive.Contains(ext))||PortableWithin(p,rule.Root,fresh,sessionMarkers))return new(SafetyLevel.Protected,"软件 / 项目","检测到应用、配置、项目、模型或虚拟机");
+   if(Sensitive.Contains(ext)||ExecutableStateExtensions.Contains(ext)||PortableWithin(p,rule.Root,fresh,sessionMarkers))return new(SafetyLevel.Protected,"软件 / 项目","检测到应用、配置、项目、模型或虚拟机");
    if(rule.Extensions is not null&&!rule.Extensions.Contains(ext,StringComparer.OrdinalIgnoreCase))return new(SafetyLevel.UserData,"未知临时数据","未匹配明确可清理的文件类型");
    if(rule.NamePrefix is not null&&!Path.GetFileName(p).StartsWith(rule.NamePrefix,StringComparison.OrdinalIgnoreCase))return new(SafetyLevel.UserData,"用户数据","不符合缓存名称规则");
    if(IsRecent(f,utcNow,rule.MinimumAge))
    {
     var reason=IsBrowserRule(rule.Id)
      ?"最近 7 天浏览器缓存默认保留，可减少常用网站重新下载资源和首次加载变慢"
-     :rule.Id.Equals("shader",StringComparison.OrdinalIgnoreCase)
+     :rule.Id.StartsWith("shader",StringComparison.OrdinalIgnoreCase)
       ?"近期着色器缓存可能影响游戏/图形程序启动与首轮渲染，默认暂不清理"
       :"文件较新或仍可能被系统/应用频繁使用，默认暂不清理";
     return new(SafetyLevel.Optional,rule.Label,reason,rule.Id);
@@ -240,7 +253,7 @@ public sealed class SafetyPolicy
   {
    var cacheRule="AppCache:"+appCacheRoot;
    if(UserContentExtensions.Contains(ext))return new(SafetyLevel.UserData,"应用缓存中的个人文件","检测到图片、视频、文档或压缩包；默认保留，由用户确认",cacheRule);
-   if(ExecutableStateExtensions.Contains(ext)||ext is ".gguf" or ".safetensors" or ".onnx" or ".pt" or ".pth" or ".ckpt" or ".vhd" or ".vhdx" or ".vmdk" or ".vdi" or ".qcow2")
+   if(ExecutableStateExtensions.Contains(ext)||Sensitive.Contains(ext))
     return new(SafetyLevel.Protected,"应用程序文件","缓存目录中出现程序、驱动、模型或虚拟磁盘文件，无法证明可安全删除",cacheRule);
    if(StatefulCacheExtensions.Contains(ext))
     return new(SafetyLevel.Protected,"应用缓存状态","数据库/配置型文件可能承载索引、会话或应用状态，无法证明删除后无影响，因此受保护",cacheRule);
@@ -274,6 +287,23 @@ public sealed class SafetyPolicy
 
   if(Sensitive.Contains(ext))return new(SafetyLevel.Protected,ext is ".gguf" or ".safetensors" or ".onnx" or ".pt" or ".pth" or ".ckpt"?"AI 模型":ext is ".vhd" or ".vhdx" or ".vmdk" or ".vdi" or ".qcow2"?"虚拟机":"软件与项目","应用、配置或工作数据不清理");
   return new(SafetyLevel.UserData,"用户数据","无法证明为垃圾，默认保留");
+ }
+ bool TrySystemDiagnostic(string path,FileSnapshot? snapshot,DateTime utcNow,out Classification result)
+ {
+  result=new(SafetyLevel.Protected,"系统诊断数据","仅明确的旧报告和已轮转日志允许清理");
+  var report=systemReportRoots.Any(root=>Within(path,root));
+  var cbs=Within(path,cbsLogs);
+  if(!report&&!cbs)return false;
+  // Do not whitelist all of ProgramData, Windows\Logs, current CBS.log or report attachments.
+  var name=Path.GetFileName(path);var ext=Path.GetExtension(path);
+  var accepted=report?new[]{".wer",".dmp",".hdmp",".cab"}.Contains(ext,StringComparer.OrdinalIgnoreCase)
+   :System.Text.RegularExpressions.Regex.IsMatch(name,@"^CbsPersist_\d+(?:_\d+)?\.(?:cab|log)$",System.Text.RegularExpressions.RegexOptions.IgnoreCase|System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+  if(!accepted)return true;
+  var age=TimeSpan.FromDays(report?14:30);var id=report?"system-wer":"system-cbs-archive";
+  var label=report?"系统旧错误报告":"Windows 已轮转组件日志";
+  result=new(snapshot is not null&&!IsRecent(snapshot,utcNow,age)?SafetyLevel.Safe:SafetyLevel.Optional,label,
+   "仅清理明确诊断文件；保留近期报告、当前日志及不匹配的附件。删除后无法用该旧报告排障。",id);
+  return true;
  }
  bool TryClassifyLocalPrograms(string path,bool isDirectory,DateTime utcNow,bool fresh,IDictionary<string,bool>? sessionMarkers,out Classification result)
  {
@@ -311,7 +341,7 @@ public sealed class SafetyPolicy
    return true;
   }
 
-  result=new(SafetyLevel.Safe,"卸载程序残留","未匹配当前安装记录、超过 30 天且无可运行主程序；普通残留文件可推荐清理",ruleId);
+  result=new(SafetyLevel.Optional,"疑似卸载程序残留","缺少安装记录并不能证明数据无用；请确认不再需要后手动选择，一键安全清理默认保留",ruleId);
   return true;
  }
 
@@ -410,6 +440,8 @@ public sealed class SafetyPolicy
    if(!Within(path,baseRoot))continue;
    var relative=Path.GetRelativePath(baseRoot,path);var parts=relative.Split(Path.DirectorySeparatorChar,StringSplitOptions.RemoveEmptyEntries);
    if(parts.Length<2)continue;
+   // Check every descendant before accepting a cache ancestor: a directory name is not proof of disposable data.
+   if(parts.Any(IsPersistentStateDirectory))return false;
    for(var i=1;i<parts.Length;i++)
    {
     if(parts[i].Equals("CacheStorage",StringComparison.OrdinalIgnoreCase)||parts[i].Equals("Service Worker",StringComparison.OrdinalIgnoreCase)||parts[i].Equals("IndexedDB",StringComparison.OrdinalIgnoreCase)||parts[i].Equals("Local Storage",StringComparison.OrdinalIgnoreCase)||parts[i].Equals("Session Storage",StringComparison.OrdinalIgnoreCase))return false;
@@ -418,6 +450,14 @@ public sealed class SafetyPolicy
    }
   }
   return false;
+ }
+ static bool IsPersistentStateDirectory(string part)=>part.Equals("CacheStorage",StringComparison.OrdinalIgnoreCase)||part.Equals("Service Worker",StringComparison.OrdinalIgnoreCase)||part.Equals("IndexedDB",StringComparison.OrdinalIgnoreCase)||part.Equals("Local Storage",StringComparison.OrdinalIgnoreCase)||part.Equals("Session Storage",StringComparison.OrdinalIgnoreCase);
+ bool IsPersistentAppState(string path)=>appDataRoots.Any(root=>Within(path,root))&&path.Split(new[]{'\\','/'},StringSplitOptions.RemoveEmptyEntries).Any(IsPersistentStateDirectory);
+ static bool IsPersistentCacheFile(string path)
+ {
+  var name=Path.GetFileName(path);
+  return new[]{"Cookies","Login Data","Web Data","Preferences","Secure Preferences","History","Bookmarks",".env"}.Contains(name,StringComparer.OrdinalIgnoreCase)||
+   name.EndsWith("-wal",StringComparison.OrdinalIgnoreCase)||name.EndsWith("-shm",StringComparison.OrdinalIgnoreCase)||name.EndsWith("-journal",StringComparison.OrdinalIgnoreCase);
  }
  bool TryAppDataOwner(string path,out string ownerRoot,out string ownerName)
  {
@@ -524,4 +564,3 @@ public sealed class SafetyPolicy
   }catch(IOException){return true;}catch(UnauthorizedAccessException){return true;}
  }
 }
-

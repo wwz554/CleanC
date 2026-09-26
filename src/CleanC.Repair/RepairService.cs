@@ -11,7 +11,7 @@ public sealed record RepairCommand(string Executable,string Arguments,string Tit
 public sealed record RepairProgress(int Percent,string Stage);
 public sealed record RepairResult(RepairAction Action,int ExitCode,DateTimeOffset StartedUtc,DateTimeOffset EndedUtc,string Output,bool RequiresRestart,string Conclusion)
 {
- public bool Success=>Conclusion.StartsWith("修复成功",StringComparison.Ordinal)||Conclusion.StartsWith("系统状态良好",StringComparison.Ordinal)||Conclusion.StartsWith("已验证",StringComparison.Ordinal);
+ public bool Success=>!RequiresRestart&&ExitCode==0&&(Conclusion.StartsWith("修复成功",StringComparison.Ordinal)||Conclusion.StartsWith("系统状态良好",StringComparison.Ordinal)||Conclusion.StartsWith("已验证",StringComparison.Ordinal));
  public string Summary=>Conclusion;
 }
 public static class RepairCommands
@@ -23,19 +23,24 @@ public static class RepairCommands
   RepairAction.ImageRestore=>new("dism.exe","/Online /Cleanup-Image /RestoreHealth","修复 Windows 映像",true),
   RepairAction.SystemVerify=>new("sfc.exe","/verifyonly","系统文件检查",false),
   RepairAction.SystemRepair=>new("sfc.exe","/scannow","修复系统文件",true),
-  RepairAction.DiskScan=>new("chkdsk.exe","C: /scan","C 盘文件系统在线检查",false),
+  RepairAction.DiskScan=>new("chkdsk.exe",SystemVolume+" /scan","系统盘文件系统在线检查",true),
   _=>throw new ArgumentOutOfRangeException(nameof(action))};
+ public static string SystemVolume=>Path.GetPathRoot(Environment.GetFolderPath(Environment.SpecialFolder.Windows))!.TrimEnd('\\');
 }
 public sealed class RepairService(ICapabilityGate gate,AuditLog log)
 {
- public bool IsRunning{get;private set;}
+ int running;
+ public bool IsRunning=>Volatile.Read(ref running)!=0;
  public static bool IsAdministrator=>new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
  public async Task<RepairResult> RunAsync(RepairAction action,IProgress<RepairProgress>? progress)
  {
   gate.Demand(FeatureCapability.SystemRepair);
   if(IsRunning)throw new InvalidOperationException("已有系统检查或修复正在运行。");
   if(!IsAdministrator)throw new UnauthorizedAccessException("此操作需要管理员权限，请使用管理员身份运行 CleanC。");
-  IsRunning=true;
+  using var maintenance=MaintenanceLock.Enter();
+  if(RepairCommands.Get(action).ChangesSystem&&WindowsMaintenanceState.RestartPending!=false)
+   throw new InvalidOperationException("Windows 尚待重启或无法确认重启状态，请先重启再执行修复。");
+  if(Interlocked.CompareExchange(ref running,1,0)!=0)throw new InvalidOperationException("已有系统检查或修复正在运行。");
   try
   {
    if(action==RepairAction.FullRepair)return await RunFullRepairAsync(progress).ConfigureAwait(false);
@@ -45,7 +50,7 @@ public sealed class RepairService(ICapabilityGate gate,AuditLog log)
    var primaryEnd=command.ChangesSystem?78:86;
    var primary=await RunCommandAsync(action,command,2,primaryEnd,progress).ConfigureAwait(false);
    report.AppendLine("=== PRIMARY ===").AppendLine(primary.Output);
-   var requiresRestart=primary.ExitCode==3010;
+   var requiresRestart=primary.ExitCode is 3010 or 1641;
    string conclusion;int finalExit=primary.ExitCode;
 
    if(action is RepairAction.ImageCheck or RepairAction.ImageScan)
@@ -75,8 +80,8 @@ public sealed class RepairService(ICapabilityGate gate,AuditLog log)
    }
    else if(action==RepairAction.SystemRepair)
    {
-    if(primary.ExitCode!=0&&AnalyzeSfcVerify(primary.Output).StartsWith("SFC 无法执行",StringComparison.Ordinal))
-     conclusion=AnalyzeSfcVerify(primary.Output);
+    if(primary.ExitCode!=0)
+     conclusion=$"系统文件修复未成功完成（错误码 {primary.ExitCode}）。"+AnalyzeSfcVerify(primary.Output);
     else
     {
      progress?.Report(new(82,"正在独立执行 SFC /verifyonly"));
@@ -102,6 +107,7 @@ public sealed class RepairService(ICapabilityGate gate,AuditLog log)
     else conclusion=AnalyzeCheck(action,primary.ExitCode,primary.Output);
    }
 
+   requiresRestart|=finalExit is 3010 or 1641||WindowsMaintenanceState.RestartPending!=false;
    if(requiresRestart&&conclusion.StartsWith("修复成功",StringComparison.Ordinal))
     conclusion="修复命令已完成，但 Windows 要求重启；重启后必须再次验证，当前不标记为最终修复成功。";
 
@@ -109,7 +115,7 @@ public sealed class RepairService(ICapabilityGate gate,AuditLog log)
    var result=new RepairResult(action,finalExit,started,DateTimeOffset.UtcNow,report.ToString(),requiresRestart,conclusion);
    SaveResult(result);return result;
   }
-  finally{IsRunning=false;}
+  finally{Interlocked.Exchange(ref running,0);}
  }
 
  async Task<RepairResult> RunFullRepairAsync(IProgress<RepairProgress>? progress)
@@ -127,24 +133,28 @@ public sealed class RepairService(ICapabilityGate gate,AuditLog log)
     :$"完整修复停止：DISM /RestoreHealth 失败，错误码 {dism.ExitCode}。";
    return FinishFull(started,report,dism.ExitCode,false,text,progress);
   }
+  if(dism.ExitCode==3010||WindowsMaintenanceState.RestartPending!=false)
+   return FinishFull(started,report,dism.ExitCode,true,"Windows 映像处理完成，但需要重启后再继续系统文件修复与复检。",progress);
 
   progress?.Report(new(44,"正在独立验证 Windows 映像"));
   var image=await QueryImageHealthAsync(true).ConfigureAwait(false);
   report.AppendLine("=== DISM VERIFY ===").AppendLine(image.Raw);
-  if(image.State!=0)return FinishFull(started,report,image.ExitCode,false,ImageHealthText(image.State,true),progress);
+  if(image.State!=0)return FinishFull(started,report,image.ExitCode,dism.ExitCode==3010,ImageHealthText(image.State,true),progress);
 
   progress?.Report(new(58,"正在修复受保护的 Windows 系统文件"));
   var sfc=await RunCommandAsync(RepairAction.SystemRepair,RepairCommands.Get(RepairAction.SystemRepair),58,79,progress).ConfigureAwait(false);
   report.AppendLine("=== SFC SCANNOW ===").AppendLine(sfc.Output);
+  if(sfc.ExitCode is 3010 or 1641||WindowsMaintenanceState.RestartPending!=false)
+   return FinishFull(started,report,sfc.ExitCode,true,"系统文件修复要求重启；重启后重新运行复检。",progress);
 
   progress?.Report(new(80,"正在独立验证系统文件"));
   var sfcVerify=await RunCommandAsync(RepairAction.SystemVerify,RepairCommands.Get(RepairAction.SystemVerify),80,91,progress).ConfigureAwait(false);
   report.AppendLine("=== SFC VERIFYONLY ===").AppendLine(sfcVerify.Output);
   var sfcConclusion=AnalyzeSfcVerify(sfcVerify.Output);
   if(sfcVerify.ExitCode!=0)
-   return FinishFull(started,report,sfcVerify.ExitCode,false,$"完整修复未通过 SFC 二次验证：验证进程返回错误码 {sfcVerify.ExitCode}。{sfcConclusion}",progress);
+   return FinishFull(started,report,sfcVerify.ExitCode,dism.ExitCode==3010,$"完整修复未通过 SFC 二次验证：验证进程返回错误码 {sfcVerify.ExitCode}。{sfcConclusion}",progress);
   if(!sfcConclusion.StartsWith("系统状态良好",StringComparison.Ordinal))
-   return FinishFull(started,report,sfcVerify.ExitCode,false,"完整修复未通过 SFC 二次验证："+sfcConclusion,progress);
+   return FinishFull(started,report,sfcVerify.ExitCode,dism.ExitCode==3010,"完整修复未通过 SFC 二次验证："+sfcConclusion,progress);
 
   progress?.Report(new(92,"正在检查 C 盘文件系统"));
   var disk=await RunCommandAsync(RepairAction.DiskScan,RepairCommands.Get(RepairAction.DiskScan),92,98,progress).ConfigureAwait(false);
@@ -154,7 +164,7 @@ public sealed class RepairService(ICapabilityGate gate,AuditLog log)
    var verifyDisk=await RunCommandAsync(RepairAction.DiskScan,RepairCommands.Get(RepairAction.DiskScan),98,99,progress).ConfigureAwait(false);
    report.AppendLine("=== CHKDSK VERIFY ===").AppendLine(verifyDisk.Output);disk=verifyDisk;
   }
-  if(disk.ExitCode!=0)return FinishFull(started,report,disk.ExitCode,false,"Windows 映像和系统文件已通过验证，但 "+AnalyzeDiskExit(disk.ExitCode,true),progress);
+  if(disk.ExitCode!=0)return FinishFull(started,report,disk.ExitCode,dism.ExitCode==3010,"Windows 映像和系统文件已通过验证，但 "+AnalyzeDiskExit(disk.ExitCode,true),progress);
 
   var restart=dism.ExitCode==3010;
   var sfcActionFailed=sfc.ExitCode!=0;
@@ -168,6 +178,8 @@ public sealed class RepairService(ICapabilityGate gate,AuditLog log)
 
  RepairResult FinishFull(DateTimeOffset started,StringBuilder report,int exitCode,bool restart,string conclusion,IProgress<RepairProgress>? progress)
  {
+  restart|=exitCode is 3010 or 1641||WindowsMaintenanceState.RestartPending!=false;
+  if(restart&&conclusion.StartsWith("修复成功",StringComparison.Ordinal))conclusion="检查已结束，但 Windows 需要重启；重启后复检才能确认最终状态。";
   progress?.Report(new(100,conclusion));
   var result=new RepairResult(RepairAction.FullRepair,exitCode,started,DateTimeOffset.UtcNow,report.ToString(),restart,conclusion);
   SaveResult(result);return result;

@@ -13,7 +13,7 @@ var suite=new Tests();
 await suite.Run();
 return suite.Failed==0?0:1;
 
-sealed class Tests
+sealed partial class Tests
 {
  public int Failed;int passed;
  readonly string root=Path.Combine(Path.GetTempPath(),"CleanC-tests-"+Guid.NewGuid().ToString("N"));
@@ -37,6 +37,60 @@ sealed class Tests
   });
   await Test("Offline attempts lock after five failures",()=>{using var session=new OfflineActivationSession("DEVICE-TEST","test",clock.SystemUtc);for(int i=0;i<5;i++)Check(!session.Verify("0000000000000000",out _,out _));Check(!session.IsValid);});
   await Test("Offline human input normalization",()=>Check(OfflineActivationSession.Normalize("abcd-efgh jkmn-pqrs")=="ABCDEFGHJKMNPQRS"));
+  await Test("Repair result requires zero exit and no reboot",()=>{
+   foreach(var text in new[]{"修复成功，已验证","系统状态良好","已验证正常"}){
+    Check(!new RepairResult(RepairAction.FullRepair,5,clock.Now,clock.Now,"",false,text).Success);
+    Check(!new RepairResult(RepairAction.FullRepair,0,clock.Now,clock.Now,"",true,text).Success);
+    Check(new RepairResult(RepairAction.FullRepair,0,clock.Now,clock.Now,"",false,text).Success);
+   }
+  });
+  await Test("Persistent app state nested under cache is protected",()=>{
+   var local=Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+   foreach(var state in new[]{"IndexedDB","Service Worker","CacheStorage","Local Storage","Session Storage"}){
+    var path=Path.Combine(local,"CleanCTestNested","Cache",state,"valuable.bin");
+    foreach(var p in new[]{new SafetyPolicy(),new SafetyPolicy([new("Chrome-Test-Cache",Path.Combine(local,"CleanCTestNested","Cache"),"cache",TimeSpan.Zero)])}){
+     Check(p.Classify(Snapshot(path),DateTime.UtcNow).Safety==SafetyLevel.Protected);
+     Check(p.ClassifyPath(path,false).Safety==SafetyLevel.Protected);
+    }
+   }
+  });
+  await Test("Executable and model in browser cache never auto delete",()=>{
+   var cache=Path.Combine(root,"browser-sensitive");Directory.CreateDirectory(cache);
+   var p=new SafetyPolicy([new("Chrome-Test-Cache",cache,"cache",TimeSpan.Zero)]);
+   foreach(var ext in new[]{".dll",".exe",".ps1",".onnx",".gguf",".sqlite",".json"})Check(p.Classify(Snapshot(Path.Combine(cache,"keep"+ext)),DateTime.UtcNow).Safety==SafetyLevel.Protected);
+  });
+  await Test("Driver backup is not one-click garbage",()=>{
+   var p=new SafetyPolicy();var path=Path.Combine(AppPaths.DriverBackups,"test-not-created","driver.sys");
+   Check(p.Classify(Snapshot(path),DateTime.UtcNow).Safety==SafetyLevel.Optional);
+   Check(p.Classify(Snapshot(path) with{Links=2},DateTime.UtcNow).Safety==SafetyLevel.Protected);
+  });
+  await Test("Driver incomplete query flag survives updates",()=>{
+   var scan=new DriverScanResult(clock.Now,clock.Now,[],0,0,0,false,"unavailable");
+   Check(!(scan with{EndedAt=clock.Now}).OfficialCheckSucceeded);
+  });
+  await Test("Offline revocation persists after restart",async()=>{
+   var st=new MemoryStore();var lease=Lease(true) with{RenewalProtocol="offline-v2",ExpiresAt=DateTimeOffset.MaxValue,LeaseHours=0};
+   var trusted=new TrustedTimeService(clock);trusted.AcceptOffline(lease,TimeSpan.Zero);
+   st.Write("offline-license.dat",new OfflineActivationRecord(lease));st.Write("trusted-time.dat",trusted.Snapshot(lease));
+   var m=Manager(new FakeApi(this){Error="LICENSE_DISABLED"},st);await m.InitializeAsync();Check(m.Context.State==LicenseState.Active);
+   try{await m.RefreshAsync();}catch(LicenseException e){Check(e.Code=="LICENSE_DISABLED");}
+   Check(m.Context.State==LicenseState.Suspended);
+   var restarted=Manager(new FakeApi(this){Offline=true},st);await restarted.InitializeAsync();Check(restarted.Context.State==LicenseState.Suspended);
+  });
+  await Test("Changed volatile browser cache is skipped",async()=>{
+   var file=Old("volatile/entry.bin");var p=new SafetyPolicy([new("Chrome-Test-Cache",Path.GetDirectoryName(file)!,"cache",TimeSpan.Zero)]);
+   var before=Snap(file);var item=new ScanItem(1,before,p.Classify(before,DateTime.UtcNow));Check(item.Classification.Safety==SafetyLevel.Safe);
+   File.AppendAllText(file,"changed");File.SetLastWriteTimeUtc(file,DateTime.UtcNow.AddDays(-9));
+   var report=await new CleanupExecutor(gate,p,log).ExecuteAsync([item],false,null,CancellationToken.None);
+   Check(report.Deleted==0&&report.Skipped==1&&File.Exists(file));
+  });
+  await Test("Malformed API objects produce friendly errors",async()=>{
+   foreach(var value in new[]{"null","[]","42","{\"success\":false,\"code\":42}"}){
+    using var api=new LicenseApi(new(),new RawApi(value));bool rejected=false;
+    try{await api.Post("license/activate",new{},CancellationToken.None);}catch(LicenseException){rejected=true;}
+    Check(rejected);
+   }
+  });
   await Test("Lease v4 raw-byte P1363 signature",()=>{var l=verifier.VerifyLease(Envelope(Lease()),"DEVICE-TEST");Check(l.Version==4);});
   await Test("Tampered signed payload rejected",()=>{var e=Envelope(Lease());e=e with{SignedPayload=SignatureVerifier.Encode(Encoding.UTF8.GetBytes("{\"version\":4}"))};Throws(()=>verifier.VerifyLease(e,"DEVICE-TEST"));});
   await Test("Wrong server public key rejected",()=>{using var other=ECDsa.Create(ECCurve.NamedCurves.nistP256);Throws(()=>new SignatureVerifier(other.ExportSubjectPublicKeyInfoPem()).VerifyLease(Envelope(Lease()),"DEVICE-TEST"));});
@@ -87,8 +141,10 @@ sealed class Tests
   await Test("Explicitly selected user data is revalidated before deletion",async()=>{var p=Old("temp/user.tmp");var item=Item(p) with{Classification=new(SafetyLevel.UserData,"User","User selected")};var r=await Cleaner().ExecuteAsync([item],false,null,CancellationToken.None);Check(!File.Exists(p)&&r.Deleted==1);});
   await Test("Cancellation does not start deletion",async()=>{var p=Old("temp/cancel.tmp");using var c=new CancellationTokenSource();c.Cancel();try{await Cleaner().ExecuteAsync([Item(p)],false,null,c.Token);}catch(OperationCanceledException){}Check(File.Exists(p));});
   await Test("No permission means scanner cannot start",async()=>{var denied=new Gate{Allowed=false};var db=new ScanDatabase(Path.Combine(root,"denied.db"));bool threw=false;try{await new DirectoryScanner(denied,policy,db,log).ScanAsync(root,null,CancellationToken.None);}catch(UnauthorizedAccessException){threw=true;}Check(threw);});
-  await Test("Repair commands are fixed Microsoft tools",()=>{Check(RepairCommands.Get(RepairAction.ImageRestore).Arguments=="/Online /Cleanup-Image /RestoreHealth");Check(RepairCommands.Get(RepairAction.DiskScan).Arguments=="C: /scan");Check(!new RepairResult(RepairAction.ImageCheck,5,clock.Now,clock.Now,"",false,"failed").Success);});
-  await Test("Production bootstrap verifies with embedded public key",async()=>{using var http=new HttpClient{Timeout=TimeSpan.FromSeconds(20)};var text=await http.GetStringAsync("https://wwz554.ccwu.cc/bootstrap/v1/config");var envelope=JsonSerializer.Deserialize<SignedEnvelope>(text,SignatureVerifier.Json)!;var payload=new SignatureVerifier().Verify<JsonElement>(envelope);Check(payload.GetProperty("apiVersion").GetInt32()==3&&payload.GetProperty("leaseVersion").GetInt32()==4);});
+  await Test("Repair commands are fixed Microsoft tools",()=>{Check(RepairCommands.Get(RepairAction.ImageRestore).Arguments=="/Online /Cleanup-Image /RestoreHealth");Check(RepairCommands.Get(RepairAction.DiskScan).Arguments==RepairCommands.SystemVolume+" /scan");Check(RepairCommands.Get(RepairAction.DiskScan).ChangesSystem);Check(!new RepairResult(RepairAction.ImageCheck,5,clock.Now,clock.Now,"",false,"failed").Success);});
+  if(Environment.GetEnvironmentVariable("CLEANC_LIVE_TESTS")=="1")
+   await Test("Production bootstrap verifies with embedded public key",async()=>{using var http=new HttpClient{Timeout=TimeSpan.FromSeconds(20)};var text=await http.GetStringAsync("https://wwz554.ccwu.cc/bootstrap/v1/config");var envelope=JsonSerializer.Deserialize<SignedEnvelope>(text,SignatureVerifier.Json)!;var payload=new SignatureVerifier().Verify<JsonElement>(envelope);Check(payload.GetProperty("apiVersion").GetInt32()==3&&payload.GetProperty("leaseVersion").GetInt32()==4);});
+  else Console.WriteLine("SKIP Production bootstrap live probe (set CLEANC_LIVE_TESTS=1; offline regression does not assert server availability)");
   await Test("Recovery quarantine and restore round trip",()=>{var p=Old("temp/recover.tmp");var expected=File.ReadAllBytes(p);var recovery=new RecoveryService(gate,log,Path.Combine(root,"recovery"));var item=recovery.Quarantine(Snap(p),policy);Check(!File.Exists(p)&&File.Exists(item.StoredPath));recovery.Restore(item);Check(expected.SequenceEqual(File.ReadAllBytes(p)));bool rejected=false;try{recovery.Restore(item);}catch(IOException){rejected=true;}Check(rejected);});
   await Test("Hardlinked file is protected",()=>{var p=Old("temp/hardlink.tmp");var alias=Path.Combine(root,"hardlink-alias.tmp");Check(NativeTests.CreateHardLink(alias,p,IntPtr.Zero));using var pin=new PinnedFile(p);Check(pin.Snapshot.Links==2&&policy.Classify(pin.Snapshot,DateTime.UtcNow).Safety==SafetyLevel.Protected);});
   await Test("Pinned ancestor cannot be renamed during deletion",()=>{var p=Old("temp/pinned/data.tmp");using var pin=new PinnedFile(p,true);bool blocked=false;try{Directory.Move(Path.GetDirectoryName(p)!,Path.Combine(root,"moved"));}catch(IOException){blocked=true;}Check(blocked);});
@@ -131,6 +187,7 @@ sealed class Tests
    }
    Check(!Directory.EnumerateFiles(root,"exit-cleanup.db.exit-*").Any());
   });
+  await RunMaintenanceTests();
   Console.WriteLine($"RESULT: {passed} passed, {Failed} failed. Fixtures: {root}");
  }
  Lease Lease(bool permanent=false)=>new(){Version=4,ApiVersion=3,LicenseId="license-test",DeviceId="DEVICE-TEST",Edition="Pro",LicenseType=permanent?"permanent":"duration",IsPermanent=permanent,CountdownRequired=!permanent,Features=["clean","scan","optimize"],IssuedAt=clock.SystemUtc,ServerTime=clock.SystemUtc,ExpiresAt=clock.SystemUtc.AddHours(72),LicenseExpiresAt=permanent?null:clock.SystemUtc.AddDays(7),LeaseHours=72,RenewalProtocol="challenge-refresh",Nonce="test-nonce"};
@@ -164,6 +221,6 @@ sealed class Tests
 sealed class FakeClock:ITimeSource {public DateTimeOffset Now=new(2026,9,17,12,0,0,TimeSpan.Zero);public TimeSpan Elapsed=TimeSpan.FromDays(1);public string Boot="boot-one";public DateTimeOffset SystemUtc=>Now;public TimeSpan Uptime=>Elapsed;public string BootId=>Boot;}
 sealed class MemoryStore:IProtectedStore{readonly Dictionary<string,string> data=[];public T? Read<T>(string name)=>data.TryGetValue(name,out var s)?JsonSerializer.Deserialize<T>(s,SignatureVerifier.Json):default;public void Write<T>(string name,T value)=>data[name]=JsonSerializer.Serialize(value,SignatureVerifier.Json);}
 sealed class FakeDevice:IDeviceIdentity{public string DeviceId=>"DEVICE-TEST";public string PublicKeyPem=>"test-public-only";public string Sign(string nonce)=>"device-signature";}
+sealed class RawApi(string json):HttpMessageHandler{protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken token)=>Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent(json,Encoding.UTF8,"application/json")});}
 sealed class Gate:ICapabilityGate{public bool Allowed=true;public void Demand(FeatureCapability capability){if(!Allowed)throw new UnauthorizedAccessException();}}
 static class NativeTests{[System.Runtime.InteropServices.DllImport("kernel32.dll",CharSet=System.Runtime.InteropServices.CharSet.Unicode,SetLastError=true)]public static extern bool CreateHardLink(string name,string existing,IntPtr security);}
-

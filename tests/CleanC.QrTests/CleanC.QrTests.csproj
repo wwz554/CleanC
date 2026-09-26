@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="QRCoder" Version="1.6.0" />
+    <PackageReference Include="ZXing.Net" Version="0.16.11" />
+    <ProjectReference Include="../../src/CleanC.Licensing/CleanC.Licensing.csproj" />
+    <Compile Include="../../src/CleanC.App/Controls/StandardParticleQrRenderer.cs" Link="StandardParticleQrRenderer.cs" />
+  </ItemGroup>
+</Project>
