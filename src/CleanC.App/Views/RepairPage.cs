@@ -17,7 +17,7 @@ public sealed partial class MainWindow
   var actions=Enum.GetValues<RepairAction>();
   foreach(var action in actions)repairSelector.Items.Add(new ComboBoxItem{Content=RepairCommands.Get(action).Title,Tag=action});
   repairSelector.SelectedIndex=Array.IndexOf(actions,repairUiAction);
-  var description=Ui.T("所有检查和修复均调用 Microsoft Windows 内置组件。只有独立复检明确通过才显示“已验证修复成功”；未知输出、缺少修复源或需要重启时绝不会误报为正常。完整修复按微软建议执行 DISM → SFC，并在最后检查 C 盘文件系统。",13,false,Ui.Muted);
+  var description=Ui.T("所有检查和修复均调用 Microsoft Windows 内置组件。只有独立复检明确通过才显示“已验证修复成功”；未知输出、缺少修复源或需要重启时绝不会误报为正常。完整修复按微软建议执行 DISM → SFC，并在最后检查 Windows 所在系统盘的文件系统。",13,false,Ui.Muted);
   repairResultBox=new TextBox{AcceptsReturn=true,IsReadOnly=true,TextWrapping=TextWrapping.Wrap,Height=120,FontSize=14,CornerRadius=new CornerRadius(16),PlaceholderText="这里仅显示检查或修复结果。",Text=repairUiResult};
   repairStatusText=Ui.T(repairUiStatus,13,true);repairPercentText=Ui.T($"{repairUiPercent:0}%",13,true,Ui.Accent);
   repairBar=new ProgressBar{Minimum=0,Maximum=100,Value=repairUiPercent,Height=8,HorizontalAlignment=HorizontalAlignment.Stretch};
@@ -38,11 +38,13 @@ public sealed partial class MainWindow
  async Task RunRepairFromUi()
  {
   if(RepairBackgroundWorkRunning){SetStatus("系统检查或修复已经在后台运行。");return;}
-  if(cleanupRunning){await Notice("清理正在进行","为了避免磁盘写入互相影响，请等待清理结束后再进行系统修复。C 盘扫描可以与系统检查同时运行。");return;}
+  if(cleanupPreparing||cleanupRunning||cleanupFinalizing||fileMoveRunning){await Notice("磁盘任务正在进行","请等待清理或文件移动结束后再进行系统修复。只读扫描可以与系统检查同时运行。");return;}
   if(services.Drivers.IsInstalling){await Notice("驱动正在安装","请等待驱动安装结束后再运行系统修复。");return;}
   var action=repairUiAction;var command=RepairCommands.Get(action);
   if(!RepairService.IsAdministrator){await Notice("需要管理员权限","请关闭 CleanC，然后右键程序选择“以管理员身份运行”。正式安装版启动时会自动请求权限。");return;}
   if(command.ChangesSystem&&!await Confirm(command.Title,"将使用 Windows 官方组件执行系统修复。修复结束后 CleanC 会自动再次检查结果。","开始修复"))return;
+  if(RepairBackgroundWorkRunning||cleanupPreparing||cleanupRunning||cleanupFinalizing||fileMoveRunning||DriverBackgroundWorkRunning)
+  {await Notice("任务状态已变化","请等待其他维护任务完成后再重试。");return;}
 
   Interlocked.Increment(ref repairUiWorkflowCount);
   try
