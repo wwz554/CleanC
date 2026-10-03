@@ -21,7 +21,7 @@ public sealed class LicenseContext(TrustedTimeService time) : ICapabilityGate
   LicenseState.ClockRollbackSuspected=>"时间待验证",LicenseState.LeaseExpired=>"租约待续期",
   LicenseState.InvalidSignature=>"授权待验证",LicenseState.DeviceMismatch=>"设备待验证",
   LicenseState.Suspended or LicenseState.Revoked=>"授权已停用",
-  LicenseState.ServerUnavailable=>"验证暂不可用",_=>"未激活"};
+  LicenseState.ServerUnavailable=>"验证暂不可用",LicenseState.UpgradeRequired=>"授权升级待验证",_=>"未激活"};
  public string Countdown=>State!=LicenseState.Active?Caption:Lease!.IsPermanent?"永久授权":Display.Countdown(Lease.LicenseExpiresAt!.Value-time.Now);
  public DateTimeOffset? TrustedNow=>time.Initialized?time.Now:null;
  public void Demand(FeatureCapability feature){if(State!=LicenseState.Active||!Lease!.Has(feature))throw new LicenseException("CAPABILITY_DENIED",State==LicenseState.Active?"此授权未开放该功能。":StatusText);}
@@ -34,6 +34,7 @@ public sealed class LicenseContext(TrustedTimeService time) : ICapabilityGate
  LicenseState.DeviceMismatch=>"设备身份不匹配，请重新验证。",
  LicenseState.Suspended or LicenseState.Revoked=>"授权已停用或设备已解绑。",
  LicenseState.ServerUnavailable=>"授权服务暂时不可用，请连接网络后重试。",
+ LicenseState.UpgradeRequired=>"旧离线授权需要升级凭证。请用原授权码在手机重新扫码领取签名文件，原到期时间不变。",
  _=>"请输入授权码以激活 CleanC。"
  };
 }

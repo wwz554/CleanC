@@ -11,6 +11,7 @@ public sealed class SignatureVerifier
  public T Verify<T>(SignedEnvelope envelope)
  {
   try{
+   if(envelope is null||string.IsNullOrEmpty(envelope.SignedPayload)||string.IsNullOrEmpty(envelope.Signature))throw new CryptographicException();
    using var ec=ECDsa.Create();ec.ImportFromPem(publicKey);
    var payload=Decode(envelope.SignedPayload);var sig=Decode(envelope.Signature);
    if(sig.Length!=64||!ec.VerifyData(payload,sig,HashAlgorithmName.SHA256,DSASignatureFormat.IeeeP1363FixedFieldConcatenation))throw new CryptographicException();
@@ -28,4 +29,25 @@ public sealed class SignatureVerifier
    throw new LicenseException("INVALID_LEASE","服务器租约字段不完整或不符合 v4 协议。");
   return l;
  }
+ public OfflineCredential VerifyOffline(SignedEnvelope envelope,string deviceId)
+ {
+  var p=Verify<OfflineCredential>(envelope);
+  var l=p.Lease;
+  if(l is null)throw new LicenseException("INVALID_LEASE","离线凭证缺少授权信息。");
+  if(l.DeviceId!=deviceId)throw new LicenseException("DEVICE_MISMATCH","签名凭证属于另一台电脑，请重新扫码领取。");
+  if(p.Version!=1||p.App!="CleanC"||p.Purpose!="offline-entitlement-v1"||
+   l.Version!=4||l.ApiVersion!=3||l.RenewalProtocol!="offline-v3"||l.LeaseHours!=0||
+   string.IsNullOrWhiteSpace(l.LicenseId)||string.IsNullOrWhiteSpace(l.Nonce)||l.Features is null||
+   l.IssuedAt!=l.ServerTime||l.ServerTime.Year<2020||l.ExpiresAt<=l.ServerTime||
+   l.ExpiresAt!=(l.LicenseExpiresAt??DateTimeOffset.MaxValue)||l.IsPermanent!=(l.LicenseType=="permanent")||
+   l.CountdownRequired==l.IsPermanent||l.IsPermanent!=(l.LicenseExpiresAt is null)||
+   (!l.IsPermanent&&l.LicenseType is not ("duration" or "fixed"))||
+   p.RequestHash is null||p.CodeHash is null||
+   p.ChallengeNonce is null||
+   !((p.RequestHash.Length==0&&p.CodeHash.Length==0&&p.ChallengeNonce.Length is >=16 and <=512)||
+    (IsHash(p.RequestHash)&&IsHash(p.CodeHash)&&p.ChallengeNonce.Length==0)))
+   throw new LicenseException("INVALID_LEASE","签名凭证字段不完整或协议不匹配。");
+  return p;
+ }
+ static bool IsHash(string value)=>value.Length==64&&value.All(c=>c is >= '0' and <= '9' or >= 'a' and <= 'f');
 }

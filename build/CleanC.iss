@@ -33,7 +33,8 @@ Source: "..\docs\CleanC-User-Guide.txt"; DestDir: "{app}"; Flags: ignoreversion
 Name: "{group}\CleanC"; Filename: "{app}\CleanC.exe"; WorkingDir: "{app}"; IconFilename: "{app}\Assets\CleanC-shell-1.6.8.ico"; IconIndex: 0; AppUserModelID: "CleanC.Desktop"
 Name: "{autodesktop}\CleanC"; Filename: "{app}\CleanC.exe"; WorkingDir: "{app}"; IconFilename: "{app}\Assets\CleanC-shell-1.6.8.ico"; IconIndex: 0; AppUserModelID: "CleanC.Desktop"
 
-; No automatic scan, repair, activation or background service is started by installation.
+; No scan, repair or background service is started by installation.
+; In-app upgrades launch the app, which validates legacy offline credentials once.
 ; User license, logs and recovery files are intentionally retained on uninstall.
 
 [Run]
@@ -41,6 +42,26 @@ Filename: "{app}\CleanC.exe"; Description: "Launch CleanC"; Flags: nowait; Check
 
 [Code]
 function IsUpdate: Boolean;
+var
+  I: Integer;
 begin
-  Result := Pos('/UPDATE', UpperCase(GetCmdTail)) > 0;
+  Result := False;
+  for I := 1 to ParamCount do
+    if UpperCase(ParamStr(I)) = '/UPDATE' then Result := True;
 end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  Channel: String;
+begin
+  if CurStep = ssPostInstall then begin
+    Channel := 'manual';
+    if IsUpdate then Channel := 'in-app';
+    if not SaveStringToFile(ExpandConstant('{app}\upgrade-origin.json'),
+      '{"version":"{#AppVersion}","channel":"' + Channel + '"}', False) then
+      RaiseException('Could not save upgrade origin. Please reinstall CleanC.');
+  end;
+end;
+
+[UninstallDelete]
+Type: files; Name: "{app}\upgrade-origin.json"

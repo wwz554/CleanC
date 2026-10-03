@@ -44,21 +44,32 @@ jobs:
       - name: Installer install, reinstall and uninstall smoke (ephemeral runner only)
         shell: pwsh
         run: |
-          $target = Join-Path $env:RUNNER_TEMP ('CleanC-install-smoke-' + [guid]::NewGuid().ToString('N'))
+          $target = Join-Path $env:RUNNER_TEMP ('CleanC-UPDATE-install-smoke-' + [guid]::NewGuid().ToString('N'))
           $sentinelDirectory = Join-Path $env:LOCALAPPDATA 'CleanC'
           New-Item -ItemType Directory -Path $sentinelDirectory -Force | Out-Null
           $sentinel = Join-Path $sentinelDirectory 'ci-preserve-sentinel.txt'
           'test fixture, not an authorization' | Set-Content -LiteralPath $sentinel
           $expected = (Get-FileHash -LiteralPath $sentinel -Algorithm SHA256).Hash
           foreach ($attempt in 1..2) {
-            $setup = Start-Process -FilePath (Resolve-Path artifacts/installer/CleanC-Setup.exe) -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',("/DIR=`"$target`"")) -WindowStyle Hidden -Wait -PassThru
+            $setupArgs = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',("/DIR=`"$target`""))
+            if ($attempt -eq 2) { $setupArgs += '/UPDATE' }
+            $setup = Start-Process -FilePath (Resolve-Path artifacts/installer/CleanC-Setup.exe) -ArgumentList $setupArgs -WindowStyle Hidden -Wait -PassThru
             if ($setup.ExitCode -ne 0) { throw "Installer exit $($setup.ExitCode)" }
             if (-not (Test-Path -LiteralPath (Join-Path $target 'CleanC.pri'))) { throw 'Installed resources missing' }
             [xml]$props = Get-Content Directory.Build.props
             $installedVersion = (Get-Item -LiteralPath (Join-Path $target 'CleanC.exe')).VersionInfo.ProductVersion
             if ($installedVersion.Split('+')[0] -ne [string]$props.Project.PropertyGroup.Version) { throw 'Installed version mismatch' }
+            $origin = Get-Content -LiteralPath (Join-Path $target 'upgrade-origin.json') -Raw | ConvertFrom-Json
+            $expectedChannel = if ($attempt -eq 2) { 'in-app' } else { 'manual' }
+            if ($origin.channel -ne $expectedChannel -or $origin.version -ne [string]$props.Project.PropertyGroup.Version) { throw 'Installer upgrade provenance mismatch' }
             if ((Get-FileHash -LiteralPath $sentinel -Algorithm SHA256).Hash -ne $expected) { throw 'Install altered persisted data fixture' }
           }
+          # Only the app launched by this test installer in the ephemeral runner.
+          Start-Sleep -Seconds 5
+          $appExe = Join-Path $target 'CleanC.exe'
+          $installedApps = @(Get-Process -Name CleanC -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $appExe })
+          if ($installedApps.Count -eq 0) { throw 'Updated installed application did not remain running' }
+          foreach ($app in $installedApps) { $null = $app.CloseMainWindow(); if (-not $app.WaitForExit(15000)) { Stop-Process -Id $app.Id -Force } }
           $uninstaller = Join-Path $target 'unins000.exe'
           if (-not (Test-Path -LiteralPath $uninstaller)) { throw 'Uninstaller missing' }
           $uninstall = Start-Process -FilePath $uninstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART') -WindowStyle Hidden -Wait -PassThru
