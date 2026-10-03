@@ -846,7 +846,8 @@ public sealed partial class MainWindow
     if(dryRun)outcomes.Add(new("shell:RecycleBinFolder","WouldDelete",selection.RecycleInfo.Bytes,$"用户已勾选所有本地磁盘回收站，共 {selection.RecycleInfo.Items:N0} 项"));
     else
     {
-     var rb=await Task.Run(()=>services.RecycleBin.EmptyAll());freed+=rb.FreedBytes;
+     var recycleToken=cleanupCancellation?.Token??new CancellationToken(true);
+     var rb=await Task.Run(()=>services.RecycleBin.EmptyConfirmed(selection.RecycleInfo,recycleToken));freed+=rb.FreedBytes;
      ApplyRecycleBinCleanupResult(rb);
      if(rb.Success){deleted++;outcomes.Add(new("shell:RecycleBinFolder","Deleted",rb.FreedBytes,rb.Detail));}
      else{skipped++;outcomes.Add(new("shell:RecycleBinFolder","Skipped",rb.FreedBytes,rb.Detail));}

@@ -25,7 +25,7 @@ sealed partial class Tests
   });
   await Test("SystemTemp and vendor shader roots have conservative rules",()=>{
    var rules=new SafetyPolicy().Rules;Check(rules.Any(x=>x.Id=="windows-system-temp"&&x.MinimumAge==TimeSpan.FromDays(7)));
-   Check(rules.Count(x=>x.Id.StartsWith("shader-",StringComparison.Ordinal)&&x.MinimumAge==TimeSpan.FromDays(30))==4);
+   Check(rules.Count(x=>x.Id.StartsWith("shader-",StringComparison.Ordinal)&&x.MinimumAge==TimeSpan.FromDays(30))==5);
   });
   await Test("Cache safety is case insensitive for models, keys and database sidecars",()=>{
    var folder=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"CleanCTestState","Cache");

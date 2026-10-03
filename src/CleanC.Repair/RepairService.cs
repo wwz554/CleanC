@@ -27,8 +27,16 @@ public static class RepairCommands
   _=>throw new ArgumentOutOfRangeException(nameof(action))};
  public static string SystemVolume=>Path.GetPathRoot(Environment.GetFolderPath(Environment.SpecialFolder.Windows))!.TrimEnd('\\');
 }
-public sealed class RepairService(ICapabilityGate gate,AuditLog log)
+public interface IRepairHost
 {
+ bool IsAdministrator{get;}
+ bool? RestartPending{get;}
+ Task<(int ExitCode,string Output)> RunAsync(RepairAction action,RepairCommand command,int startPercent,int endPercent,IProgress<RepairProgress>? progress);
+ Task<(int State,int ExitCode,string Raw)> QueryImageHealthAsync(bool scan);
+}
+public sealed class RepairService(ICapabilityGate gate,AuditLog log,IRepairHost? platform=null)
+{
+ readonly IRepairHost host=platform??new WindowsRepairHost();
  int running;
  public bool IsRunning=>Volatile.Read(ref running)!=0;
  public static bool IsAdministrator=>new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
@@ -36,9 +44,9 @@ public sealed class RepairService(ICapabilityGate gate,AuditLog log)
  {
   gate.Demand(FeatureCapability.SystemRepair);
   if(IsRunning)throw new InvalidOperationException("已有系统检查或修复正在运行。");
-  if(!IsAdministrator)throw new UnauthorizedAccessException("此操作需要管理员权限，请使用管理员身份运行 CleanC。");
+  if(!host.IsAdministrator)throw new UnauthorizedAccessException("此操作需要管理员权限，请使用管理员身份运行 CleanC。");
   using var maintenance=MaintenanceLock.Enter();
-  if(RepairCommands.Get(action).ChangesSystem&&WindowsMaintenanceState.RestartPending!=false)
+  if(RepairCommands.Get(action).ChangesSystem&&host.RestartPending!=false)
    throw new InvalidOperationException("Windows 尚待重启或无法确认重启状态，请先重启再执行修复。");
   if(Interlocked.CompareExchange(ref running,1,0)!=0)throw new InvalidOperationException("已有系统检查或修复正在运行。");
   try
@@ -53,7 +61,12 @@ public sealed class RepairService(ICapabilityGate gate,AuditLog log)
    var requiresRestart=primary.ExitCode is 3010 or 1641;
    string conclusion;int finalExit=primary.ExitCode;
 
-   if(action is RepairAction.ImageCheck or RepairAction.ImageScan)
+   if(requiresRestart||(command.ChangesSystem&&host.RestartPending!=false))
+   {
+    requiresRestart=true;
+    conclusion="命令已经结束，但 Windows 需要重启或无法确认重启状态；已停止后续步骤，重启后请再次验证。";
+   }
+   else if(action is RepairAction.ImageCheck or RepairAction.ImageScan)
    {
     if(primary.ExitCode!=0&&primary.ExitCode!=3010)conclusion=$"检查失败：DISM 返回错误码 {primary.ExitCode}。";
     else
@@ -95,7 +108,7 @@ public sealed class RepairService(ICapabilityGate gate,AuditLog log)
     conclusion=AnalyzeDiskExit(primary.ExitCode,false);
     if(primary.ExitCode==1)
     {
-     progress?.Report(new(88,"正在再次验证 C 盘文件系统"));
+     progress?.Report(new(88,"正在再次验证 系统盘文件系统"));
      var verify=await RunCommandAsync(RepairAction.DiskScan,RepairCommands.Get(RepairAction.DiskScan),88,98,progress).ConfigureAwait(false);
      report.AppendLine("=== VERIFY-DISK ===").AppendLine(verify.Output);finalExit=verify.ExitCode;
      conclusion=AnalyzeDiskExit(verify.ExitCode,true);
@@ -107,7 +120,7 @@ public sealed class RepairService(ICapabilityGate gate,AuditLog log)
     else conclusion=AnalyzeCheck(action,primary.ExitCode,primary.Output);
    }
 
-   requiresRestart|=finalExit is 3010 or 1641||WindowsMaintenanceState.RestartPending!=false;
+   requiresRestart|=finalExit is 3010 or 1641||host.RestartPending!=false;
    if(requiresRestart&&conclusion.StartsWith("修复成功",StringComparison.Ordinal))
     conclusion="修复命令已完成，但 Windows 要求重启；重启后必须再次验证，当前不标记为最终修复成功。";
 
@@ -126,25 +139,25 @@ public sealed class RepairService(ICapabilityGate gate,AuditLog log)
   progress?.Report(new(2,"正在修复 Windows 组件存储"));
   var dism=await RunCommandAsync(RepairAction.ImageRestore,RepairCommands.Get(RepairAction.ImageRestore),2,42,progress).ConfigureAwait(false);
   report.AppendLine("=== DISM RESTOREHEALTH ===").AppendLine(dism.Output);
-  if(dism.ExitCode!=0&&dism.ExitCode!=3010)
+  if(dism.ExitCode!=0&&dism.ExitCode is not (3010 or 1641))
   {
    var text=IsDismSourceError(dism.Output,dism.ExitCode)
     ?"完整修复停止：DISM 无法获得匹配的微软修复源。请提供与当前 Windows 匹配的安装介质后再继续。"
     :$"完整修复停止：DISM /RestoreHealth 失败，错误码 {dism.ExitCode}。";
    return FinishFull(started,report,dism.ExitCode,false,text,progress);
   }
-  if(dism.ExitCode==3010||WindowsMaintenanceState.RestartPending!=false)
+  if(dism.ExitCode is 3010 or 1641||host.RestartPending!=false)
    return FinishFull(started,report,dism.ExitCode,true,"Windows 映像处理完成，但需要重启后再继续系统文件修复与复检。",progress);
 
   progress?.Report(new(44,"正在独立验证 Windows 映像"));
   var image=await QueryImageHealthAsync(true).ConfigureAwait(false);
   report.AppendLine("=== DISM VERIFY ===").AppendLine(image.Raw);
-  if(image.State!=0)return FinishFull(started,report,image.ExitCode,dism.ExitCode==3010,ImageHealthText(image.State,true),progress);
+  if(image.State!=0||image.ExitCode!=0)return FinishFull(started,report,image.ExitCode,dism.ExitCode==3010,ImageHealthText(image.State,true),progress);
 
   progress?.Report(new(58,"正在修复受保护的 Windows 系统文件"));
   var sfc=await RunCommandAsync(RepairAction.SystemRepair,RepairCommands.Get(RepairAction.SystemRepair),58,79,progress).ConfigureAwait(false);
   report.AppendLine("=== SFC SCANNOW ===").AppendLine(sfc.Output);
-  if(sfc.ExitCode is 3010 or 1641||WindowsMaintenanceState.RestartPending!=false)
+  if(sfc.ExitCode is 3010 or 1641||host.RestartPending!=false)
    return FinishFull(started,report,sfc.ExitCode,true,"系统文件修复要求重启；重启后重新运行复检。",progress);
 
   progress?.Report(new(80,"正在独立验证系统文件"));
@@ -156,7 +169,7 @@ public sealed class RepairService(ICapabilityGate gate,AuditLog log)
   if(!sfcConclusion.StartsWith("系统状态良好",StringComparison.Ordinal))
    return FinishFull(started,report,sfcVerify.ExitCode,dism.ExitCode==3010,"完整修复未通过 SFC 二次验证："+sfcConclusion,progress);
 
-  progress?.Report(new(92,"正在检查 C 盘文件系统"));
+  progress?.Report(new(92,"正在检查 系统盘文件系统"));
   var disk=await RunCommandAsync(RepairAction.DiskScan,RepairCommands.Get(RepairAction.DiskScan),92,98,progress).ConfigureAwait(false);
   report.AppendLine("=== CHKDSK SCAN ===").AppendLine(disk.Output);
   if(disk.ExitCode==1)
@@ -171,14 +184,14 @@ public sealed class RepairService(ICapabilityGate gate,AuditLog log)
   var conclusion=restart
    ?"DISM、SFC、CHKDSK 当前检查均已完成，但 Windows 要求重启。重启后再次运行“完整修复并验证”才能得到最终健康结论。"
    :sfcActionFailed
-    ?$"最终验证正常：DISM ScanHealth=Healthy；SFC /verifyonly 无完整性冲突；CHKDSK C: /scan 退出码 0。但本轮 SFC /scannow 返回错误码 {sfc.ExitCode}，因此只确认当前系统文件最终状态健康，不把本轮 SFC 修复动作标记为成功。"
-    :"修复成功，已验证：DISM ScanHealth=Healthy；SFC /verifyonly 无完整性冲突；CHKDSK C: /scan 复检退出码 0。";
+    ?$"最终验证正常：DISM ScanHealth=Healthy；SFC /verifyonly 无完整性冲突；CHKDSK 系统盘 /scan 退出码 0。但本轮 SFC /scannow 返回错误码 {sfc.ExitCode}，因此只确认当前系统文件最终状态健康，不把本轮 SFC 修复动作标记为成功。"
+    :"修复成功，已验证：DISM ScanHealth=Healthy；SFC /verifyonly 无完整性冲突；CHKDSK 系统盘 /scan 复检退出码 0。";
   return FinishFull(started,report,disk.ExitCode,restart,conclusion,progress);
  }
 
  RepairResult FinishFull(DateTimeOffset started,StringBuilder report,int exitCode,bool restart,string conclusion,IProgress<RepairProgress>? progress)
  {
-  restart|=exitCode is 3010 or 1641||WindowsMaintenanceState.RestartPending!=false;
+  restart|=exitCode is 3010 or 1641||host.RestartPending!=false;
   if(restart&&conclusion.StartsWith("修复成功",StringComparison.Ordinal))conclusion="检查已结束，但 Windows 需要重启；重启后复检才能确认最终状态。";
   progress?.Report(new(100,conclusion));
   var result=new RepairResult(RepairAction.FullRepair,exitCode,started,DateTimeOffset.UtcNow,report.ToString(),restart,conclusion);
@@ -194,6 +207,20 @@ public sealed class RepairService(ICapabilityGate gate,AuditLog log)
 
 
  async Task<(int ExitCode,string Output)> RunCommandAsync(RepairAction action,RepairCommand command,int startPercent,int endPercent,IProgress<RepairProgress>? progress)
+ {
+  // Never interrupt a Windows write already running; revalidate before each new one.
+  if(command.ChangesSystem)
+  {
+   try{gate.Demand(FeatureCapability.SystemRepair);}
+   catch(Exception e){return(5,"授权校验未通过，未启动下一项维护："+e.Message);}
+   if(host.RestartPending!=false)return(3010,"Windows 需要重启或无法确认状态，未启动下一项维护。");
+  }
+  return await host.RunAsync(action,command,startPercent,endPercent,progress).ConfigureAwait(false);
+ }
+
+ Task<(int State,int ExitCode,string Raw)> QueryImageHealthAsync(bool scan)=>host.QueryImageHealthAsync(scan);
+
+ static async Task<(int ExitCode,string Output)> RunNativeCommandAsync(RepairAction action,RepairCommand command,int startPercent,int endPercent,IProgress<RepairProgress>? progress)
  {
   var output=new StringBuilder();var sync=new object();int last=startPercent;
   var path=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),command.Executable);
@@ -211,7 +238,7 @@ public sealed class RepairService(ICapabilityGate gate,AuditLog log)
   string rawOutput;lock(sync){rawOutput=output.ToString();}return(process.ExitCode,rawOutput);
  }
 
- async Task<(int State,int ExitCode,string Raw)> QueryImageHealthAsync(bool scan)
+ static async Task<(int State,int ExitCode,string Raw)> QueryNativeImageHealthAsync(bool scan)
  {
   var ps=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),@"WindowsPowerShell\v1.0\powershell.exe");
   var mode=scan?"ScanHealth":"CheckHealth";
@@ -222,7 +249,8 @@ public sealed class RepairService(ICapabilityGate gate,AuditLog log)
   var stdout=process.StandardOutput.ReadToEndAsync();var stderr=process.StandardError.ReadToEndAsync();
   await process.WaitForExitAsync().ConfigureAwait(false);
   var raw=(await stdout.ConfigureAwait(false))+Environment.NewLine+(await stderr.ConfigureAwait(false));
-  var m=Regex.Match(raw,@"CLEANC_HEALTH=(\d+)",RegexOptions.CultureInvariant);
+  var matches=Regex.Matches(raw,@"(?m)^CLEANC_HEALTH=(\d+)\r?$",RegexOptions.CultureInvariant);
+  var m=matches.Count==1?matches[0]:Match.Empty;
   return process.ExitCode==0&&m.Success&&int.TryParse(m.Groups[1].Value,out var state)&&state is >=0 and <=2
    ?(state,process.ExitCode,raw):(99,process.ExitCode,raw);
  }
@@ -237,11 +265,11 @@ public sealed class RepairService(ICapabilityGate gate,AuditLog log)
 
  static string AnalyzeDiskExit(int exitCode,bool verification)=>exitCode switch
  {
-  0=>verification?"系统状态良好：C 盘文件系统复检通过，CHKDSK 官方退出码 0。":"系统状态良好：C 盘文件系统检查通过，CHKDSK 官方退出码 0。",
+  0=>verification?"系统状态良好：系统盘文件系统复检通过，CHKDSK 官方退出码 0。":"系统状态良好：系统盘文件系统检查通过，CHKDSK 官方退出码 0。",
   1=>"CHKDSK 报告发现并处理了错误，需要再次扫描确认最终状态。",
-  2=>"发现 C 盘文件系统问题：CHKDSK 官方退出码 2，在线扫描没有得到最终正常状态。",
-  3=>"C 盘文件系统检查失败：CHKDSK 官方退出码 3，无法完成检查或错误未能修复。",
-  _=>$"无法确认 C 盘文件系统状态：CHKDSK 返回未记录的退出码 {exitCode}。"
+  2=>"发现 系统盘文件系统问题：CHKDSK 官方退出码 2，在线扫描没有得到最终正常状态。",
+  3=>"系统盘文件系统检查失败：CHKDSK 官方退出码 3，无法完成检查或错误未能修复。",
+  _=>$"无法确认 系统盘文件系统状态：CHKDSK 返回未记录的退出码 {exitCode}。"
  };
 
  static bool IsDismSourceError(string output,int exitCode)
@@ -282,8 +310,8 @@ public sealed class RepairService(ICapabilityGate gate,AuditLog log)
  static string AnalyzeDisk(string o)
  {
   if(Has(o,"Windows has scanned the file system and found no problems","Windows 已扫描文件系统并且没有发现问题","Windows 已扫描文件系统，没有发现问题"))return "系统状态良好。";
-  if(Has(o,"found problems","发现问题","found errors","发现错误","errors found","发现了错误"))return "发现 C 盘文件系统问题。";
-  return "无法确认 C 盘文件系统状态：CHKDSK 文本输出未匹配标准结论。";
+  if(Has(o,"found problems","发现问题","found errors","发现错误","errors found","发现了错误"))return "发现 系统盘文件系统问题。";
+  return "无法确认 系统盘文件系统状态：CHKDSK 文本输出未匹配标准结论。";
  }
  static string AnalyzeVerifiedRepair(RepairAction action,int verifyExit,string verifyOutput)
  {
@@ -293,5 +321,13 @@ public sealed class RepairService(ICapabilityGate gate,AuditLog log)
   return verify.StartsWith("系统状态良好",StringComparison.Ordinal)
    ?"修复成功，已验证：SFC /verifyonly 未发现完整性冲突。"
    :$"修复未通过独立验证：{verify}";
+ }
+ sealed class WindowsRepairHost:IRepairHost
+ {
+  public bool IsAdministrator=>RepairService.IsAdministrator;
+  public bool? RestartPending=>WindowsMaintenanceState.RestartPending;
+  public Task<(int ExitCode,string Output)> RunAsync(RepairAction action,RepairCommand command,int startPercent,int endPercent,IProgress<RepairProgress>? progress)
+   =>RunNativeCommandAsync(action,command,startPercent,endPercent,progress);
+  public Task<(int State,int ExitCode,string Raw)> QueryImageHealthAsync(bool scan)=>QueryNativeImageHealthAsync(scan);
  }
 }

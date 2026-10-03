@@ -4,191 +4,134 @@ using CleanC.Logging;
 namespace CleanC.Cleaner;
 
 public readonly record struct RecycleBinVolumeInfo(string Root,long Items,long Bytes);
-
 public readonly record struct RecycleBinInfo(long Items,long Bytes,IReadOnlyList<RecycleBinVolumeInfo>? Volumes=null,bool QueryComplete=true)
 {
  public IReadOnlyList<RecycleBinVolumeInfo> DriveItems=>Volumes??Array.Empty<RecycleBinVolumeInfo>();
 }
-
 public readonly record struct RecycleBinCleanupResult(
  bool Success,long Items,long FreedBytes,string Detail,long RemainingItems=0,long RemainingBytes=0,RecycleBinInfo FinalState=default);
 
-public sealed class RecycleBinService(ICapabilityGate gate,AuditLog log)
+public interface IRecycleBinHost
 {
- [StructLayout(LayoutKind.Sequential)]
- struct SHQUERYRBINFO{public uint cbSize;public long i64Size;public long i64NumItems;}
-
- [DllImport("shell32.dll",CharSet=CharSet.Unicode)]
- static extern int SHQueryRecycleBinW(string? pszRootPath,ref SHQUERYRBINFO pSHQueryRBInfo);
-
- [DllImport("shell32.dll",CharSet=CharSet.Unicode)]
- static extern int SHEmptyRecycleBinW(nint hwnd,string? pszRootPath,uint dwFlags);
-
- const uint NoConfirmation=0x1,NoProgressUi=0x2,NoSound=0x4;
- const int HrFileNotFound=unchecked((int)0x80070002);
- const int HrPathNotFound=unchecked((int)0x80070003);
- const int HrInvalidDrive=unchecked((int)0x8007000F);
-
- static string Root(string root)=>Path.GetPathRoot(Path.GetFullPath(root))??root;
- static bool IsBenignMissing(int hr)=>hr is HrFileNotFound or HrPathNotFound or HrInvalidDrive;
-
- static IReadOnlyList<string> LocalRecycleRoots()
+ IReadOnlyList<string> LocalRoots();
+ bool TryQuery(string root,out RecycleBinVolumeInfo volume);
+ int Empty(string root);
+}
+public sealed class RecycleBinService(ICapabilityGate gate,AuditLog log,IRecycleBinHost? platform=null)
+{
+ readonly IRecycleBinHost host=platform??new WindowsRecycleBinHost();
+ static string Root(string value)
  {
-  var roots=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-  foreach(var drive in DriveInfo.GetDrives())
-  {
-   try
-   {
-    if(!drive.IsReady)continue;
-    if(drive.DriveType is not (DriveType.Fixed or DriveType.Removable))continue;
-    var root=Root(drive.RootDirectory.FullName);
-    if(!string.IsNullOrWhiteSpace(root))roots.Add(root);
-   }
-   catch{}
-  }
-  return roots.OrderBy(x=>x,StringComparer.OrdinalIgnoreCase).ToArray();
+  var root=Path.GetPathRoot(Path.GetFullPath(value))??"";
+  if(root.Length!=3||!char.IsAsciiLetter(root[0])||root[1]!=':'||root[2]!='\\')
+   throw new ArgumentException("只能操作明确的本地磁盘回收站。");
+  return root;
  }
-
  bool TryQueryDrive(string root,out RecycleBinVolumeInfo volume)
  {
-  root=Root(root);
   volume=new(root,0,0);
   try
   {
-   var info=new SHQUERYRBINFO{cbSize=(uint)Marshal.SizeOf<SHQUERYRBINFO>()};
-   var hr=SHQueryRecycleBinW(root,ref info);
-   if(hr<0)
-   {
-    if(IsBenignMissing(hr))
-    {
-     log.Write("Cleanup","RecycleBinQuery","NoBin",root,$"HRESULT=0x{hr:X8}");
-     return true;
-    }
-    log.Write("Cleanup","RecycleBinQuery","Failed",root,$"HRESULT=0x{hr:X8}");
-    return false;
-   }
-   volume=new(root,Math.Max(0,info.i64NumItems),Math.Max(0,info.i64Size));
-   return true;
+   if(host.TryQuery(root,out var raw)&&raw.Items>=0&&raw.Bytes>=0)
+   {volume=new(root,raw.Items,raw.Bytes);return true;}
   }
-  catch(Exception e)
-  {
-   log.Write("Cleanup","RecycleBinQuery","Failed",root,e.ToString());
-   return false;
-  }
+  catch(Exception e){log.Write("Cleanup","RecycleBinQuery","Failed",root,e.Message);}
+  return false;
  }
-
- public RecycleBinInfo Query(string root)
+ RecycleBinInfo QueryRoots(IEnumerable<string> roots)
  {
-  return TryQueryDrive(root,out var volume)
-   ?new RecycleBinInfo(volume.Items,volume.Bytes,volume.Items>0||volume.Bytes>0?new[]{volume}:Array.Empty<RecycleBinVolumeInfo>(),true)
-   :new RecycleBinInfo(0,0,Array.Empty<RecycleBinVolumeInfo>(),false);
- }
-
- public RecycleBinInfo QueryAll()
- {
-  var volumes=new List<RecycleBinVolumeInfo>();
-  long items=0,bytes=0;var complete=true;
-  foreach(var root in LocalRecycleRoots())
+  var volumes=new List<RecycleBinVolumeInfo>();var complete=true;
+  foreach(var root in roots.Select(Root).Distinct(StringComparer.OrdinalIgnoreCase))
   {
    if(!TryQueryDrive(root,out var volume)){complete=false;continue;}
-   if(volume.Items<=0&&volume.Bytes<=0)continue;
-   volumes.Add(volume);
-   items+=volume.Items;
-   bytes+=volume.Bytes;
+   volumes.Add(volume); // Keep verified zeroes distinct from missing query results.
   }
-  return new(Math.Max(0,items),Math.Max(0,bytes),volumes,complete);
+  return new(volumes.Sum(x=>x.Items),volumes.Sum(x=>x.Bytes),volumes,complete);
  }
+ public RecycleBinInfo Query(string root)=>QueryRoots([Root(root)]);
+ public RecycleBinInfo QueryAll()=>QueryRoots(host.LocalRoots());
 
- public RecycleBinCleanupResult Empty(string root)
+ public RecycleBinCleanupResult Empty(string root)=>EmptyConfirmed(Query(root),refreshAll:false);
+ public RecycleBinCleanupResult EmptyAll()=>EmptyConfirmed(QueryAll());
+ // Callers must pass the snapshot shown in their confirmation. Never add a newly attached drive.
+ public RecycleBinCleanupResult EmptyConfirmed(RecycleBinInfo confirmed,CancellationToken token=default,bool refreshAll=true)
  {
   gate.Demand(FeatureCapability.Cleanup);
-  var before=Query(root);
-  if(!before.QueryComplete)return new(false,0,0,"该磁盘回收站状态无法确认，本次不执行清空。",FinalState:before);
-  if(before.Items<=0)return new(true,0,0,"该磁盘回收站已经为空。",FinalState:before);
-  return EmptyVolumes(before.DriveItems);
- }
-
- public RecycleBinCleanupResult EmptyAll()
- {
-  gate.Demand(FeatureCapability.Cleanup);
-  var before=QueryAll();
-  if(!before.QueryComplete)return new(false,0,0,"至少一个本地磁盘回收站状态无法确认，本次不执行批量清空，避免把查询失败误认为空。",FinalState:before);
-  if(before.Items<=0)return new(true,0,0,"所有本地磁盘回收站已经为空。",FinalState:before);
-  return EmptyVolumes(before.DriveItems);
- }
-
- RecycleBinCleanupResult EmptyVolumes(IReadOnlyList<RecycleBinVolumeInfo> targets)
- {
-  if(targets.Count==0)return new(true,0,0,"回收站已经为空。",FinalState:new RecycleBinInfo(0,0,Array.Empty<RecycleBinVolumeInfo>(),true));
-
-  var beforeItems=targets.Sum(x=>x.Items);
-  var beforeBytes=targets.Sum(x=>x.Bytes);
+  using var maintenance=MaintenanceLock.Enter();
+  if(!confirmed.QueryComplete)
+   return new(false,0,0,"回收站状态无法确认，本次未执行清空，请重新查询。",FinalState:confirmed);
+  var targets=confirmed.DriveItems.Where(x=>x.Items>0||x.Bytes>0).ToArray();
+  if(targets.Any(x=>x.Items<0||x.Bytes<0)||targets.Select(x=>Root(x.Root)).Distinct(StringComparer.OrdinalIgnoreCase).Count()!=targets.Length||
+   confirmed.Items!=confirmed.DriveItems.Sum(x=>x.Items)||confirmed.Bytes!=confirmed.DriveItems.Sum(x=>x.Bytes))
+   throw new ArgumentException("回收站确认快照无效。");
   var errors=new List<string>();
-
-  foreach(var target in targets.Where(x=>x.Items>0||x.Bytes>0))
+  foreach(var target in targets)
   {
+   var root=Root(target.Root);
+   if(token.IsCancellationRequested){errors.Add("已停止，未开始处理剩余磁盘");break;}
+   try{gate.Demand(FeatureCapability.Cleanup);}
+   catch(Exception e){errors.Add("授权校验未通过，未继续清空："+e.Message);break;}
    try
    {
-    var hr=SHEmptyRecycleBinW(0,target.Root,NoConfirmation|NoProgressUi|NoSound);
-    if(hr>=0)continue;
-
-    // The bin can disappear between scan and cleanup. If Shell says the path is
-    // gone and a re-query is already empty, this is a successful final state.
-    if(IsBenignMissing(hr)&&TryQueryDrive(target.Root,out var verifyMissing)&&verifyMissing.Items<=0)
-    {
-     log.Write("Cleanup","RecycleBinEmpty","AlreadyEmpty",target.Root,$"HRESULT=0x{hr:X8}");
-     continue;
-    }
-
-    var detail=Marshal.GetExceptionForHR(hr)?.Message??$"HRESULT=0x{hr:X8}";
-    errors.Add($"{target.Root.TrimEnd('\\')}：{detail}");
-    log.Write("Cleanup","RecycleBinEmpty","Failed",target.Root,$"HRESULT=0x{hr:X8}; {detail}");
+    if(!host.LocalRoots().Contains(root,StringComparer.OrdinalIgnoreCase)||!TryQueryDrive(root,out var current))
+    {errors.Add(root+" 状态无法确认，已跳过");continue;}
+    if(current.Items==0&&current.Bytes==0)continue;
+    if(current.Items!=target.Items||current.Bytes!=target.Bytes)
+    {errors.Add(root+" 回收站内容已变化，请重新确认后清理");continue;}
+    // Shell offers a per-volume operation, not an immutable per-item transaction.
+    var hr=host.Empty(root);
+    if(hr<0)errors.Add(root+$" 清空失败（HRESULT=0x{hr:X8}）");
    }
-   catch(Exception e)
-   {
-    errors.Add($"{target.Root.TrimEnd('\\')}：{e.Message}");
-    log.Write("Cleanup","RecycleBinEmpty","Failed",target.Root,e.ToString());
-   }
+   catch(Exception e){errors.Add(root+" "+e.Message);}
   }
-
-  // Re-query the aggregate result instead of assuming a successful HRESULT means
-  // that every volume is empty. Short retries cover delayed Shell counter updates.
-  RecycleBinInfo after=QueryAll();
-  for(var attempt=0;attempt<3&&after.Items>0;attempt++)
+  var after=QueryRoots(targets.Select(x=>x.Root));
+  for(var retry=0;retry<3&&after.QueryComplete&&after.Items>0&&errors.Count==0;retry++)
+  {Thread.Sleep(120);after=QueryRoots(targets.Select(x=>x.Root));}
+  // Only confirmed volumes with a successful post-query contribute reclaimed bytes.
+  long cleared=0,freed=0;
+  foreach(var target in targets)
   {
-   Thread.Sleep(120);
-   after=QueryAll();
+   var verified=after.DriveItems.FirstOrDefault(x=>x.Root.Equals(Root(target.Root),StringComparison.OrdinalIgnoreCase));
+   if(string.IsNullOrEmpty(verified.Root))continue;
+   cleared+=Math.Max(0,target.Items-verified.Items);freed+=Math.Max(0,target.Bytes-verified.Bytes);
   }
-
-  var clearedItems=Math.Max(0,beforeItems-after.Items);
-  var freedBytes=Math.Max(0,beforeBytes-after.Bytes);
-  var remainingDrives=after.DriveItems.Where(x=>x.Items>0)
-   .Select(x=>$"{x.Root.TrimEnd('\\')} {x.Items:N0} 项")
-   .ToArray();
-
-  if(!after.QueryComplete)
-  {
-   var verifyDetailText=$"回收站清理后至少一个磁盘无法复核；已确认清除 {clearedItems:N0} 项，但最终状态未知。";
-   log.Write("Cleanup","RecycleBinEmpty","VerifyFailed","AllLocalDrives",verifyDetailText);
-   return new(false,clearedItems,freedBytes,verifyDetailText,after.Items,after.Bytes,after);
-  }
-
-  if(after.Items<=0)
-  {
-   log.Write("Cleanup","RecycleBinEmpty","Completed","AllLocalDrives",
-    $"cleared={clearedItems}; freed={freedBytes}; drives={targets.Count}");
-   return new(true,clearedItems,freedBytes,
-    $"已清空所有本地磁盘回收站，共清除 {clearedItems:N0} 项。",0,0,after);
-  }
-
-  var remainingText=remainingDrives.Length==0
-   ?$"仍有 {after.Items:N0} 项"
-   :$"仍有 {after.Items:N0} 项（{string.Join(" · ",remainingDrives)}）";
-  var errorText=errors.Count==0?"":$"；异常：{string.Join("；",errors)}";
-  var partialDetailText=$"回收站只完成了部分清理：已清除 {clearedItems:N0} 项，{remainingText}{errorText}";
-
-  log.Write("Cleanup","RecycleBinEmpty","Partial","AllLocalDrives",
-   $"cleared={clearedItems}; freed={freedBytes}; remaining={after.Items}; {string.Join(" | ",errors)}");
-  return new(false,clearedItems,freedBytes,partialDetailText,after.Items,after.Bytes,after);
+  var success=after.QueryComplete&&after.Items==0&&after.Bytes==0&&errors.Count==0;
+  var detail=success?$"已清空所确认磁盘的回收站，清除 {cleared:N0} 项。"
+   :$"回收站处理未全部完成；已复核减少 {cleared:N0} 项，剩余 {after.Items:N0} 项。"+
+    (!after.QueryComplete?"部分磁盘无法复核，最终状态未知。":"")+string.Join("；",errors);
+  // Refresh the UI's all-drive row, but never include unconfirmed drives in cleanup or success.
+  var final=refreshAll?QueryAll():after;
+  log.Write("Cleanup","RecycleBinEmpty",success?"Completed":"Partial",detail:detail);
+  return new(success,cleared,freed,detail,after.Items,after.Bytes,final);
  }
+
+ sealed class WindowsRecycleBinHost:IRecycleBinHost
+ {
+  public IReadOnlyList<string> LocalRoots()
+  {
+   var roots=new List<string>();
+   foreach(var drive in DriveInfo.GetDrives())
+   {
+    try{if(drive.IsReady&&drive.DriveType is DriveType.Fixed or DriveType.Removable)roots.Add(Root(drive.RootDirectory.FullName));}
+    catch(IOException){}catch(UnauthorizedAccessException){}
+   }
+   return roots.Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(x=>x,StringComparer.OrdinalIgnoreCase).ToArray();
+  }
+  public bool TryQuery(string root,out RecycleBinVolumeInfo volume)
+  {
+   var info=new SHQUERYRBINFO{cbSize=(uint)Marshal.SizeOf<SHQUERYRBINFO>()};
+   var hr=SHQueryRecycleBinW(root,ref info);volume=new(root,0,0);
+   // File/path missing can mean this existing volume has no bin; invalid drive is not an empty bin.
+   if(hr is unchecked((int)0x80070002) or unchecked((int)0x80070003))return LocalRoots().Contains(root,StringComparer.OrdinalIgnoreCase);
+   if(hr<0||info.i64NumItems<0||info.i64Size<0)return false;
+   volume=new(root,info.i64NumItems,info.i64Size);return true;
+  }
+  public int Empty(string root)=>SHEmptyRecycleBinW(0,root,0x1|0x2|0x4);
+ }
+ [StructLayout(LayoutKind.Sequential)]
+ struct SHQUERYRBINFO{public uint cbSize;public long i64Size;public long i64NumItems;}
+ [DllImport("shell32.dll",CharSet=CharSet.Unicode)]
+ static extern int SHQueryRecycleBinW(string pszRootPath,ref SHQUERYRBINFO info);
+ [DllImport("shell32.dll",CharSet=CharSet.Unicode)]
+ static extern int SHEmptyRecycleBinW(nint hwnd,string pszRootPath,uint flags);
 }

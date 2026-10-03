@@ -9,7 +9,9 @@ namespace CleanC.App;
 internal sealed class ActivationPage : Grid
 {
     readonly Func<OfflineActivationSession> createSession;
-    readonly Func<string, Task> onlineActivate, offlineActivate;
+    readonly Func<string, Task> onlineActivate;
+    readonly Func<string, string, Task> offlineActivate;
+    readonly Func<Task<string?>> selectCredential;
     readonly Action copyDevice;
     readonly string? validationMessage;
     readonly Func<Task>? validateExisting;
@@ -25,12 +27,14 @@ internal sealed class ActivationPage : Grid
     bool busy;
     string error = "";
     string screen = "landing";
+    string? credential;
 
     public ActivationPage(Func<OfflineActivationSession> createSession, Func<string, Task> onlineActivate,
-        Func<string, Task> offlineActivate, Action copyDevice, string? validationMessage=null, Func<Task>? validateExisting=null)
+        Func<string, string, Task> offlineActivate, Action copyDevice, Func<Task<string?>> selectCredential, string? validationMessage=null, Func<Task>? validateExisting=null)
     {
         this.createSession = createSession; this.onlineActivate = onlineActivate;
         this.offlineActivate = offlineActivate; this.copyDevice = copyDevice;
+        this.selectCredential=selectCredential;
         this.validationMessage=validationMessage;this.validateExisting=validateExisting;
         session = createSession();
         fit.Child = host;
@@ -132,7 +136,7 @@ internal sealed class ActivationPage : Grid
         var info = Ui.Stack(12,
             Text("01  用手机扫一扫",17,true),
             Text("相机 / 微信扫一扫均可",14,true),
-            Text("对准中央完整图案，打开授权网页。\n在手机上输入授权码，取得激活码。",13,false,true),
+            Text("对准中央图案打开授权网页。\n用原授权码领取 16 位码和签名文件，\n将文件传至电脑，原到期时间不变。",13,false,true),
             Button("我已扫码，输入激活码",ShowCode,true),
             Link("返回粒子动画页",ShowLanding),
             Link("重新生成扫码图案",Refresh));
@@ -147,21 +151,26 @@ internal sealed class ActivationPage : Grid
     {
         screen = "code"; error = "";
         codeInput = Input("XXXX-XXXX-XXXX-XXXX","手机返回的16位激活码",40);
-        codeSubmit = Button("完成激活",() => _ = Run(() => offlineActivate(codeInput.Text)),true);
+        codeSubmit = Button("完成激活",() => _ = Run(() => offlineActivate(codeInput.Text,credential!)),true);
         codeSubmit.IsEnabled = false;
         codeInput.TextChanged += (_, _) => { error = ""; UpdateExpiry(); };
-        codeInput.KeyDown += (_, e) => { if(e.Key == Windows.System.VirtualKey.Enter && codeSubmit.IsEnabled) _ = Run(() => offlineActivate(codeInput.Text)); };
-        var body = Ui.Stack(15,Text("手机激活码",15,true),codeInput,codeSubmit,
+        codeInput.KeyDown += (_, e) => { if(e.Key == Windows.System.VirtualKey.Enter && codeSubmit.IsEnabled) _ = Run(() => offlineActivate(codeInput.Text,credential!)); };
+        var fileState=Text(credential is null?"尚未选择凭证文件":"已选择签名凭证文件",12,false,true);
+        var select=Button("导入签名凭证文件",()=>_=Run(async()=>{
+            var selected=await selectCredential();if(selected is null)return;
+            credential=selected;fileState.Text="已选择签名凭证文件，将在激活时验签";error="";
+        }));
+        var body = Ui.Stack(12,Text("签名凭证",15,true),select,fileState,Text("手机激活码",15,true),codeInput,codeSubmit,
             Link("返回粒子动画页",ShowLanding),Link("重新扫码",ShowScan));
         body.Width = 410; body.HorizontalAlignment = HorizontalAlignment.Center; body.VerticalAlignment = VerticalAlignment.Center;
-        host.Content = Frame("输入激活码","输入手机网页显示的 16 位激活码，支持整段粘贴。",body);
+        host.Content = Frame("完成离线激活","导入手机网页下载的凭证，再输入 16 位码。电脑无需联网。",body);
         codeInput.Loaded += (_, _) => codeInput?.Focus(FocusState.Programmatic);
         UpdateExpiry();
     }
     void Refresh()
     {
         if(busy) return;
-        try { session = createSession(); landing = null; ShowScan(); }
+        try { session = createSession(); credential=null; landing = null; ShowScan(); }
         catch(Exception e) { error = e.Message; UpdateExpiry(); }
     }
     void UpdateExpiry()
@@ -175,7 +184,7 @@ internal sealed class ActivationPage : Grid
                 : "本次扫码已过期或尝试次数已用完，请重新生成扫码图案。";
         }
         if(codeSubmit is not null && codeInput is not null)
-            codeSubmit.IsEnabled = session.IsValid && OfflineActivationSession.Normalize(codeInput.Text).Length == 16 && !busy;
+            codeSubmit.IsEnabled = session.IsValid && credential is not null && OfflineActivationSession.Normalize(codeInput.Text).Length == 16 && !busy;
         if(!string.IsNullOrEmpty(error)) { status.Text = error; status.Foreground = Ui.Danger; }
         else status.Foreground = screen == "scan" ? Ui.B("65768C") : Ui.Muted;
     }
@@ -183,9 +192,9 @@ internal sealed class ActivationPage : Grid
     {
         if(busy) return;
         busy = true; host.IsEnabled = false;
-        if(status is not null) status.Text = "正在激活…";
+        if(status is not null) status.Text = "正在处理，请稍候…";
         try { await action(); }
         catch(Exception e) { error = e.Message; if(status is not null) { status.Text = error; status.Foreground = Ui.Danger; } }
-        finally { busy = false; host.IsEnabled = true; if(codeSubmit is not null && codeInput is not null) codeSubmit.IsEnabled = session.IsValid && OfflineActivationSession.Normalize(codeInput.Text).Length == 16; }
+        finally { busy = false; host.IsEnabled = true; UpdateExpiry(); }
     }
 }

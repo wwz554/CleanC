@@ -8,9 +8,9 @@ sealed partial class Tests
  {
   MemoryStore OfflineStore(FakeClock c)
   {
-   var state=new MemoryStore();var l=Lease() with{RenewalProtocol="offline-v2",ExpiresAt=Lease().LicenseExpiresAt!.Value,LeaseHours=0};
+   var state=new MemoryStore();var l=OfflineLease();
    var trusted=new TrustedTimeService(c);trusted.AcceptOffline(l,TimeSpan.Zero);
-   state.Write("offline-license.dat",new OfflineActivationRecord(l));state.Write("trusted-time.dat",trusted.Snapshot(l));return state;
+   state.Write("offline-license.dat",new OfflineActivationRecord(l,Envelope:OfflineEnvelope(l)));state.Write("trusted-time.dat",trusted.Snapshot(l));return state;
   }
   await Test("Offline license survives reboot without network or identity replacement",async()=>{
    var c=new FakeClock();var st=OfflineStore(c);c.Boot="second-boot";c.Elapsed=TimeSpan.FromMinutes(1);c.Now+=TimeSpan.FromHours(3);
@@ -51,7 +51,7 @@ sealed partial class Tests
   await Test("Offline recovery preserves total expiry instead of a 72-hour online lease",async()=>{
    var c=new FakeClock();var st=OfflineStore(c);st.Write<TrustedTimeState?>("trusted-time.dat",null);
    var m=Manager(new FakeApi(this){Permanent=false},st,c);await m.InitializeAsync();
-   Check(m.Context.Lease!.ExpiresAt==Lease().LicenseExpiresAt&&m.Context.Lease.RenewalProtocol=="offline-v2");
+   Check(m.Context.Lease!.ExpiresAt==Lease().LicenseExpiresAt&&m.Context.Lease.RenewalProtocol=="offline-v3");
    c.Boot="after-recovery";c.Now+=TimeSpan.FromDays(4);c.Elapsed=TimeSpan.FromMinutes(1);
    var api=new FakeApi(this){Offline=true};var restarted=Manager(api,st,c);await restarted.InitializeAsync();
    Check(restarted.Context.State==LicenseState.Active&&api.Paths.Count==0);
@@ -74,7 +74,7 @@ sealed partial class Tests
   });
   await Test("Offline device mismatch is explained and never rebinds automatically",async()=>{
    var c=new FakeClock();var st=OfflineStore(c);var record=st.Read<OfflineActivationRecord>("offline-license.dat")!;
-   st.Write("offline-license.dat",record with{Lease=record.Lease with{DeviceId="other-device"}});
+   st.Write("offline-license.dat",record with{Envelope=OfflineEnvelope(record.Lease with{DeviceId="other-device"})});
    var api=new FakeApi(this);var m=Manager(api,st,c);await m.InitializeAsync();
    Check(m.Context.State==LicenseState.DeviceMismatch&&m.Context.Caption=="设备待验证"&&api.Paths.Count==0);
   });

@@ -330,7 +330,7 @@ public sealed class DriverService(ICapabilityGate gate,AuditLog log)
    token.ThrowIfCancellationRequested();
    var update=BestUpdate(item,updates);
    if(update is not null)used.Add(update.UpdateId);
-   devices.Add(new(item.DeviceId,item.Name,item.DeviceClass,item.Manufacturer,item.Provider,item.DriverVersion,item.DriverDate,item.HardwareId,item.InfName,item.IsSigned,item.ProblemCode,item.ProblemText,update,OfficialSupportUrl(item.Manufacturer,item.Provider)));
+   devices.Add(new(item.DeviceId,item.Name,item.DeviceClass,item.Manufacturer,item.Provider,item.DriverVersion,item.DriverDate,item.HardwareId,item.InfName,item.IsSigned,item.ProblemCode,item.ProblemText,update,OfficialSupportUrl(item.Manufacturer,item.Provider),warning is null));
   }
   devices=devices.OrderBy(x=>x.Health==DriverHealth.Missing?0:x.Health==DriverHealth.Problem?1:x.Health==DriverHealth.UpdateAvailable?2:3).ThenBy(x=>x.DeviceClass,StringComparer.OrdinalIgnoreCase).ThenBy(x=>x.Name,StringComparer.OrdinalIgnoreCase).ToList();
   var updateCount=devices.Count(x=>x.Update is not null);var problemCount=devices.Count(x=>x.Health is DriverHealth.Problem or DriverHealth.Missing);var unmatched=updates.Count(x=>!used.Contains(x.UpdateId));
@@ -564,6 +564,7 @@ $result=Get-CimInstance Win32_PnPEntity | Where-Object {
    return new(false,false,"当前存在多个相同硬件 ID 的设备实例。Windows UpdateDriverForPlugAndPlayDevices 会作用于匹配该硬件 ID 的设备，因此 CleanC 已拒绝自动强制恢复；请在设备管理器中针对目标设备手动恢复。",87);
 
   progress?.Report(new(22,$"正在恢复 {backup.DriverVersion}"));
+  token.ThrowIfCancellationRequested();gate.Demand(FeatureCapability.SystemRepair);DemandNoPendingRestart();
   var ok=UpdateDriverForPlugAndPlayDevicesW(IntPtr.Zero,backup.HardwareId,inf,InstallFlagForce,out var reboot);
   if(!ok)
   {
@@ -622,6 +623,7 @@ $result=Get-CimInstance Win32_PnPEntity | Where-Object {
     if(!SetupDiGetDeviceInstanceIdW(set,ref data,id,id.Capacity,out _))continue;
     if(!id.ToString().Equals(deviceId,StringComparison.OrdinalIgnoreCase))continue;
     progress?.Report(new(28,"正在回退到 Windows 备份驱动"));
+    token.ThrowIfCancellationRequested();gate.Demand(FeatureCapability.SystemRepair);DemandNoPendingRestart();
     var ok=DiRollbackDriver(set,ref data,IntPtr.Zero,RollbackFlagNoUi,out var reboot);
     if(ok)
     {
@@ -707,11 +709,13 @@ $result=Get-CimInstance Win32_PnPEntity | Where-Object {
    if(string.IsNullOrWhiteSpace(updateHardware)||!deviceHardware.Contains(updateHardware))
     return new(false,false,"安装前硬件 ID 复核失败：Windows Update 驱动已不再与当前目标设备匹配，请重新扫描驱动。",87);
    progress?.Report(new(12,"正在创建系统还原点"));
+   token.ThrowIfCancellationRequested();gate.Demand(FeatureCapability.SystemRepair);DemandNoPendingRestart();
    var restorePoint=CreateRestorePointBestEffort();log.Write("Drivers","RestorePoint",restorePoint?"Ready":"Unavailable",detail:"驱动安装前保护");
    var collType=Type.GetTypeFromProgID("Microsoft.Update.UpdateColl")??throw new PlatformNotSupportedException("Windows Update 集合组件不可用。");
    collection=Activator.CreateInstance(collType)!;collection.Add(target);
    progress?.Report(new(28,"正在安装驱动"));
    installer=session.CreateUpdateInstaller();installer.Updates=collection;
+   token.ThrowIfCancellationRequested();gate.Demand(FeatureCapability.SystemRepair);DemandNoPendingRestart();
    var installed=installer.Install();var code=SafeInt(()=>installed.ResultCode);var restart=true;
    dynamic? perUpdate=null;var perCode=0;var perHResult=unchecked((int)0x80004005);var overallHResult=unchecked((int)0x80004005);var perRestart=false;
    try{restart=Convert.ToBoolean(installed.RebootRequired,CultureInfo.InvariantCulture);overallHResult=Convert.ToInt32(installed.HResult,CultureInfo.InvariantCulture);perUpdate=installed.GetUpdateResult(0);perCode=Convert.ToInt32(perUpdate.ResultCode,CultureInfo.InvariantCulture);perHResult=Convert.ToInt32(perUpdate.HResult,CultureInfo.InvariantCulture);perRestart=Convert.ToBoolean(perUpdate.RebootRequired,CultureInfo.InvariantCulture);}catch{perHResult=unchecked((int)0x80004005);perRestart=true;}

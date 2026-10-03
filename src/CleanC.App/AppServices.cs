@@ -48,6 +48,7 @@ public sealed class AppServices
   var log=new AuditLog();var store=new ProtectedStore();var identity=new DeviceIdentity(store);var api=new LicenseApi(new());
   var database=new ScanDatabase();
   try{log.Write("Database","SQLiteNative","Ready",detail:database.SQLiteVersion());}catch(Exception e){log.Write("Database","SQLiteNative","Unknown",detail:e.Message);}
-  return new(new(api,new SignatureVerifier(),identity,store,new WindowsTimeSource(),log),database,log,new SafetyPolicy());
+  var channel=UpgradeOrigin.Read(AppContext.BaseDirectory,typeof(AppServices).Assembly.GetName().Version?.ToString(3)??"1.7.2");
+  return new(new(api,new SignatureVerifier(),identity,store,new WindowsTimeSource(),log,channel),database,log,new SafetyPolicy());
  }
 }

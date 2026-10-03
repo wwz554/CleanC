@@ -3,7 +3,7 @@ using System.Runtime.CompilerServices;
 namespace CleanC.Core;
 public enum SafetyLevel { Safe, Optional, UserData, Protected }
 public enum FeatureCapability { Scan, Cleanup, SystemRepair, AdvancedAnalysis }
-public enum LicenseState { Uninitialized, Activating, Active, LeaseExpired, Expired, ExpiredOffline, ClockRollbackSuspected, Revoked, Suspended, DeviceMismatch, InvalidSignature, ServerUnavailable }
+public enum LicenseState { Uninitialized, Activating, Active, LeaseExpired, Expired, ExpiredOffline, ClockRollbackSuspected, Revoked, Suspended, DeviceMismatch, InvalidSignature, ServerUnavailable, UpgradeRequired }
 public interface ICapabilityGate { void Demand(FeatureCapability capability); }
 public record FileSnapshot(string Path, long Size, DateTime LastWriteUtc, DateTime CreationUtc, FileAttributes Attributes, ulong FileId = 0, uint Volume = 0, uint Links = 1);
 public record Classification(SafetyLevel Safety, string Category, string Reason, string? RuleId = null) { public bool DefaultSelected => Safety == SafetyLevel.Safe; }

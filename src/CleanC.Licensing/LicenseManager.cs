@@ -11,14 +11,17 @@ public sealed class LicenseManager
  public OfflineActivationSession? OfflineSession{get;private set;}
  SavedLicense? saved;TimeSpan nextRetry;TimeSpan lastCheckpoint;int failures;bool expiryAttempted;
  readonly ITimeSource clock;
+ readonly UpgradeChannel upgradeChannel;
+ bool MigrationPending=>offline is {Envelope:null};
+ public bool CanValidateExisting=>!MigrationPending||upgradeChannel==UpgradeChannel.InApp;
  public LicenseContext Context{get;}
  public string DeviceId=>device.DeviceId;
  public bool IsBusy=>mutex.CurrentCount==0;
  public string MaskedKey=>saved is null||saved.LicenseKey.Length<4?"—":"CLC-****-****-****-"+saved.LicenseKey[^4..];
  public string LastError{get;private set;}="";
  public DateTimeOffset? FirstAcceptedUtc=>saved?.FirstAcceptedUtc;
- public LicenseManager(LicenseApi api,SignatureVerifier verifier,IDeviceIdentity device,IProtectedStore store,ITimeSource clock,AuditLog log)
- {this.api=api;this.verifier=verifier;this.device=device;this.store=store;this.clock=clock;this.log=log;time=new(clock);Context=new(time);}
+ public LicenseManager(LicenseApi api,SignatureVerifier verifier,IDeviceIdentity device,IProtectedStore store,ITimeSource clock,AuditLog log,UpgradeChannel upgradeChannel=UpgradeChannel.Manual)
+ {this.api=api;this.verifier=verifier;this.device=device;this.store=store;this.clock=clock;this.log=log;this.upgradeChannel=upgradeChannel;time=new(clock);Context=new(time);}
  public async Task InitializeAsync(CancellationToken token=default)
  {
   try {
@@ -26,11 +29,17 @@ public sealed class LicenseManager
    if(saved is null){
     offline=store.Read<OfflineActivationRecord>("offline-license.dat");
     if(offline is null)return;
-    var lease=offline.Lease;
-    if(lease.DeviceId!=device.DeviceId)throw new LicenseException("DEVICE_MISMATCH","离线授权与当前设备不匹配。");
-    if(lease.RenewalProtocol!="offline-v2"||lease.ExpiresAt!=(lease.LicenseExpiresAt??DateTimeOffset.MaxValue)||lease.IsPermanent!=(lease.LicenseType=="permanent"))throw new CryptographicException("离线记录无效。");
+    if(MigrationPending){
+     // Legacy local fields are NOT proof of authorization. Keep them only for
+     // recovery; never expose capabilities or an active countdown before signing.
+     Context.ForcedState=LicenseState.UpgradeRequired;
+     LastError=Context.StatusText;
+     if(upgradeChannel==UpgradeChannel.InApp)await TryRecoverOfflineTimeAsync(token);
+     return;
+    }
+    var lease=verifier.VerifyOffline(offline.Envelope!,device.DeviceId).Lease;
     Context.Lease=lease;Context.ForcedState=offline.Lock;time.Restore(lease,store.Read<TrustedTimeState>("trusted-time.dat"));
-    log.Write("Licensing","OfflineLocalValidation",Context.State.ToString(),detail:"offline-v2; checkpoint restored");
+    log.Write("Licensing","OfflineLocalValidation",Context.State.ToString(),detail:"offline-v3; signature and checkpoint restored");
     if(Context.State==LicenseState.ClockRollbackSuspected)await TryRecoverOfflineTimeAsync(token);
     return;
    }
@@ -57,7 +66,7 @@ public sealed class LicenseManager
     try{await RefreshOfflineCore(token);}catch(LicenseException e)when(e.Code is "LICENSE_EXPIRED_RELEASED" or "DEVICE_NOT_BOUND"){}
    }
    Context.ForcedState=LicenseState.Activating;
-   var response=await api.Post(LicenseEndpoints.Activate,new {licenseKey=key,deviceId=device.DeviceId,devicePublicKey=device.PublicKeyPem,deviceName="Windows PC",windowsVersion=Environment.OSVersion.VersionString,appVersion="1.7.1"},token);
+   var response=await api.Post(LicenseEndpoints.Activate,new {licenseKey=key,deviceId=device.DeviceId,devicePublicKey=device.PublicKeyPem,deviceName="Windows PC",windowsVersion=Environment.OSVersion.VersionString,appVersion="1.7.2"},token);
    Accept(LicenseApi.Envelope(response),key);
   }catch{if(Context.ForcedState==LicenseState.Activating)Context.ForcedState=oldState;throw;}
   finally{mutex.Release();}
@@ -65,6 +74,7 @@ public sealed class LicenseManager
  public async Task RefreshAsync(CancellationToken token=default)
  {
   if(saved is null&&offline is null)throw new LicenseException("NO_LICENSE","请先输入授权码激活。");
+  if(MigrationPending&&!CanValidateExisting)throw new LicenseException("UPGRADE_REQUIRED",Context.StatusText);
   await mutex.WaitAsync(token);try{
    if(saved is null)await RefreshOfflineCore(token);else await RefreshCore(token);
   }finally{mutex.Release();}
@@ -74,10 +84,11 @@ public sealed class LicenseManager
   try{
     var challenge=await api.Post("offline/challenge",new{deviceId=device.DeviceId},token);
     var nonce=challenge.GetProperty("nonce").GetString()??"";
-    var response=await api.Post("offline/refresh",new{deviceId=device.DeviceId,nonce,signature=device.Sign(nonce),appVersion="1.7.1"},token);
+    var response=await api.Post("offline/refresh",new{deviceId=device.DeviceId,nonce,signature=device.Sign(nonce),appVersion="1.7.2"},token);
     var licenseKey=response.TryGetProperty("licenseKey",out var keyElement)?keyElement.GetString():null;
     if(string.IsNullOrWhiteSpace(licenseKey))throw new LicenseException("INVALID_REFRESH","服务器未返回绑定授权信息。");
-    AcceptOfflineValidation(LicenseApi.Envelope(response));
+    if(!response.TryGetProperty("offlineProof",out var signed))throw new LicenseException("SERVER_UPGRADE_REQUIRED","授权服务尚未升级，请稍后重试；原授权已保留。");
+    AcceptOfflineValidation(LicenseApi.Envelope(signed),nonce);
   }catch(LicenseException e){
    LastError=e.Message;
    LicenseState? state=e.Code switch{
@@ -96,7 +107,7 @@ public sealed class LicenseManager
   try {
    var challenge=await api.Post(LicenseEndpoints.Challenge,new {licenseKey=saved.LicenseKey,deviceId=device.DeviceId},token);
    var nonce=challenge.GetProperty("nonce").GetString()??"";
-   var response=await api.Post(LicenseEndpoints.Refresh,new{licenseKey=saved.LicenseKey,deviceId=device.DeviceId,nonce,signature=device.Sign(nonce),windowsVersion=Environment.OSVersion.VersionString,appVersion="1.7.1"},token);
+   var response=await api.Post(LicenseEndpoints.Refresh,new{licenseKey=saved.LicenseKey,deviceId=device.DeviceId,nonce,signature=device.Sign(nonce),windowsVersion=Environment.OSVersion.VersionString,appVersion="1.7.2"},token);
    Accept(LicenseApi.Envelope(response),saved.LicenseKey);
   }catch(LicenseException e) {
    LastError=e.Message; failures++;ScheduleRetry();
@@ -115,17 +126,17 @@ public sealed class LicenseManager
   }
  }
  void ScheduleRetry()=>nextRetry=clock.Uptime+TimeSpan.FromMinutes(failures switch{1=>1,2=>5,3=>15,_=>60});
- void AcceptOfflineValidation(SignedEnvelope envelope)
+ void AcceptOfflineValidation(SignedEnvelope envelope,string nonce)
  {
-  var proof=verifier.VerifyLease(envelope,device.DeviceId);
-  // Revalidating an offline license must not silently replace its full authorized
-  // lifetime with a short online-renewal lease. The signed server expiry/features
-  // remain authoritative; only the local offline storage contract is retained.
-  var lease=proof with{RenewalProtocol="offline-v2",LeaseHours=0,ExpiresAt=proof.LicenseExpiresAt??DateTimeOffset.MaxValue};
+  var proof=verifier.VerifyOffline(envelope,device.DeviceId);
+  if(proof.ChallengeNonce!=nonce||proof.RequestHash.Length!=0)throw new LicenseException("INVALID_LEASE","服务器凭证不属于本次验证，请重试。");
+  var lease=proof.Lease;
+  // Store the exact signed offline entitlement, not an unsigned derived lease.
+  // Server total expiry remains authoritative; a 72-hour lease is never substituted.
   var newTime=new TrustedTimeService(clock);newTime.Accept(lease);
-  var next=new OfflineActivationRecord(lease);
+  var next=new OfflineActivationRecord(lease,Envelope:envelope);
   store.Write("trusted-time.dat",newTime.Snapshot(lease));store.Write("offline-license.dat",next);
-  offline=next;time.Accept(lease);Context.Lease=lease;Context.ForcedState=null;
+  offline=next;time.Accept(lease);Context.Lease=lease;Context.ForcedState=null;OfflineSession?.Dispose();OfflineSession=null;
   failures=0;expiryAttempted=false;nextRetry=TimeSpan.Zero;lastCheckpoint=clock.Uptime;LastError="";
   log.Write("Licensing","OfflineValidation","Accepted",detail:lease.LicenseType);
  }
@@ -159,7 +170,9 @@ public sealed class LicenseManager
   try{await RefreshAsync(token);}
   catch(Exception e)when(e is LicenseException or HttpRequestException or TaskCanceledException or IOException)
   {
-   LastError=Context.State==LicenseState.ClockRollbackSuspected
+   LastError=Context.State==LicenseState.UpgradeRequired
+    ?"旧离线授权已保留，升级验证暂未完成；联网后将自动重试，也可用原授权码扫码领取签名凭证。"
+    :Context.State==LicenseState.ClockRollbackSuspected
     ?"原离线授权已保留，但时间校验未通过；请校准 Windows 日期时间并联网验证，无需删除授权或更换设备码。"
     :Context.StatusText;
    failures++;ScheduleRetry();log.Write("Licensing","OfflineTimeRecovery","Deferred",detail:e is LicenseException le?le.Code:e.GetType().Name);
@@ -169,7 +182,7 @@ public sealed class LicenseManager
  {
   if(IsBusy)return;
   if(saved is null){
-   if(offline is not null&&Context.State==LicenseState.ClockRollbackSuspected&&clock.Uptime>=nextRetry)await TryRecoverOfflineTimeAsync();
+   if(offline is not null&&(Context.State==LicenseState.ClockRollbackSuspected||(Context.State==LicenseState.UpgradeRequired&&CanValidateExisting))&&clock.Uptime>=nextRetry)await TryRecoverOfflineTimeAsync();
    if(offline is not null&&time.Initialized&&clock.Uptime-lastCheckpoint>=TimeSpan.FromMinutes(2)){Checkpoint();lastCheckpoint=clock.Uptime;}
    return;
   }
@@ -184,15 +197,22 @@ public sealed class LicenseManager
   if(IsBusy||Context.State==LicenseState.Active)throw new LicenseException("BUSY","当前状态不能创建离线会话。");
   OfflineSession?.Dispose();return OfflineSession=new(device.DeviceId,device.PublicKeyPem,clock.SystemUtc);
  }
- public async Task CompleteOfflineActivationAsync(string code)
+ public async Task CompleteOfflineActivationAsync(string code,string? credentialFile=null)
  {
   await mutex.WaitAsync();try{
    if(Context.State==LicenseState.Active)throw new LicenseException("ALREADY_ACTIVE","当前授权仍有效。");
+   if(string.IsNullOrWhiteSpace(credentialFile))throw new LicenseException("CREDENTIAL_REQUIRED","请先导入手机网页下载的签名凭证文件，再输入 16 位激活码。");
+   var envelope=OfflineCredentialFile.Parse(credentialFile);
+   var proof=verifier.VerifyOffline(envelope,device.DeviceId);
    var session=OfflineSession;
+   if(session is null||proof.RequestHash!=OfflineCredentialFile.Hash(session.Request))throw new LicenseException("CREDENTIAL_SESSION","凭证不属于本次扫码，请选择当前二维码领取的文件，或重新扫码领取。");
    if(session is null||!session.Verify(code,out var offlineType,out var offlineExpiry))throw new LicenseException("OFFLINE_CODE_INVALID","激活码不正确或二维码已超时。最多尝试 5 次，之后请重新生成二维码。");
-   var lease=new Lease{Version=4,ApiVersion=3,LicenseId="offline:"+session.SessionId,DeviceId=device.DeviceId,Edition="standard",LicenseType=offlineType,IsPermanent=offlineType=="permanent",CountdownRequired=offlineType!="permanent",Features=["clean","scan","optimize"],IssuedAt=session.CreatedAt,ServerTime=session.CreatedAt,ExpiresAt=offlineExpiry??DateTimeOffset.MaxValue,LicenseExpiresAt=offlineExpiry,LeaseHours=0,RenewalProtocol="offline-v2",Nonce=session.SessionId};
+   var lease=proof.Lease;
+   if(proof.CodeHash!=OfflineCredentialFile.Hash(OfflineActivationSession.Normalize(code))||lease.LicenseType!=offlineType||
+    (offlineExpiry.HasValue&&(lease.LicenseExpiresAt<offlineExpiry||lease.LicenseExpiresAt>=offlineExpiry.Value.AddMinutes(1))))
+    throw new LicenseException("CREDENTIAL_CODE","激活码与签名凭证不匹配，请重新扫码领取。");
    var newTime=new TrustedTimeService(clock);newTime.AcceptOffline(lease,session.Elapsed);
-   var next=new OfflineActivationRecord(lease);
+   var next=new OfflineActivationRecord(lease,Envelope:envelope);
    store.Write("trusted-time.dat",newTime.Snapshot(lease));store.Write("offline-license.dat",next);store.Write<SavedLicense?>("license.dat",null);
    saved=null;offline=next;Context.Lease=lease;Context.ForcedState=null;time.AcceptOffline(lease,session.Elapsed);lastCheckpoint=clock.Uptime;LastError="";OfflineSession=null;
    log.Write("Licensing","OfflineActivation","Accepted",detail:offlineType);

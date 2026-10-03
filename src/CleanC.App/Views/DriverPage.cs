@@ -308,7 +308,7 @@ public sealed partial class MainWindow
   }
   var action=state switch{DriverHealth.Missing=>"安装",DriverHealth.Problem=>"修复",DriverHealth.UpdateAvailable=>"升级",_=>"处理"};
   var parts=new List<string>();if(automatic>0)parts.Add($"{automatic:N0} 个将下载官方适配驱动并排队安装");if(rollback>0)parts.Add($"{rollback:N0} 个更新后异常的设备将优先回退到上一版驱动");if(manual>0)parts.Add($"{manual:N0} 个没有自动包，保留手动处理");
-  if(!await Confirm($"一键{action}",$"将处理此卡片中的驱动：\\n\\n{string.Join("\\n",parts.Select(x=>"• "+x))}\\n\\n下载可以并行；实际安装和回退会串行执行，避免多个驱动同时修改系统。",$"一键{action}"))return;
+  if(!await Confirm($"一键{action}",$"将处理此卡片中的驱动：\n\n{string.Join("\n",parts.Select(x=>"• "+x))}\n\n下载可以并行；实际安装和回退会串行执行，避免多个驱动同时修改系统。",$"一键{action}"))return;
   foreach(var device in devices)
   {
    if(state==DriverHealth.Problem&&HasCurrentRollback(device)){_ = Guard(()=>RollbackDriver(device,true));continue;}
@@ -319,7 +319,7 @@ public sealed partial class MainWindow
  async Task StartDriverOperation(DriverDevice device,bool skipConfirm=false)
  {
   if(device.Health==DriverHealth.Normal)return;
-  if(scanRunning||cleanupRunning||RepairBackgroundWorkRunning)
+  if(scanRunning||cleanupPreparing||cleanupRunning||cleanupFinalizing||fileMoveRunning||RepairBackgroundWorkRunning)
   {
    await Notice("当前不适合安装驱动","请等待 C 盘扫描、清理或系统修复任务结束后再安装驱动。多个驱动下载可以同时进行，实际安装会自动排队。");
    return;
@@ -339,6 +339,9 @@ public sealed partial class MainWindow
    $"设备：{device.Name}\n当前版本：{(string.IsNullOrWhiteSpace(device.DriverVersion)?"未安装 / 未识别":device.DriverVersion)}\n官方更新：{target}\n\n{(isHealthyUpgrade?"CleanC 会先备份当前正常驱动；备份成功后再下载并安装新版。":"此设备当前属于驱动缺失或驱动异常，不执行原驱动备份。")}\n\n多个驱动可以并行下载，安装会按下载完成顺序自动排队。",
    action))return;
 
+  if(scanRunning||cleanupPreparing||cleanupRunning||cleanupFinalizing||fileMoveRunning||RepairBackgroundWorkRunning||
+   (driverOperations.TryGetValue(device.DeviceId,out var afterConfirm)&&(afterConfirm.Active||afterConfirm.WaitingInstall)))
+  {await Notice("任务状态已变化","请等待当前任务完成后再操作该设备。");return;}
   Interlocked.Increment(ref driverUiWorkflowCount);
   try
   {
@@ -572,6 +575,9 @@ public sealed partial class MainWindow
 
  async Task RollbackDriver(DriverDevice current,bool skipConfirm=false)
  {
+  if(scanRunning||cleanupPreparing||cleanupRunning||cleanupFinalizing||fileMoveRunning||RepairBackgroundWorkRunning||
+   (driverOperations.TryGetValue(current.DeviceId,out var active)&&(active.Active||active.WaitingInstall)))
+  {await Notice("任务正在进行","请等待当前扫描、清理、修复或该设备的驱动操作结束后再回退。");return;}
   driverLocalBackups.TryGetValue(current.DeviceId,out var backup);
   driverRollbackCandidates.TryGetValue(current.DeviceId,out var previous);
   backup??=services.Drivers.FindLatestBackup(current.DeviceId);
@@ -585,6 +591,9 @@ public sealed partial class MainWindow
   var previousVersion=backup?.DriverVersion??previous?.DriverVersion??"未知";
   var mode=backup is not null?"CleanC 升级前保存的完整驱动包":"Windows 系统保存的回退版本";
   if(!skipConfirm&&!await Confirm("回退驱动",$"设备：{current.Name}\n当前版本：{current.DriverVersion}\n更新前版本：{previousVersion}\n恢复来源：{mode}\n\nCleanC 会优先使用升级前的本地完整备份恢复原版本；只有没有本地备份时才使用 Windows 自带回退机制。","回退"))return;
+  if(scanRunning||cleanupPreparing||cleanupRunning||cleanupFinalizing||fileMoveRunning||RepairBackgroundWorkRunning||
+   (driverOperations.TryGetValue(current.DeviceId,out var afterConfirm)&&(afterConfirm.Active||afterConfirm.WaitingInstall)))
+  {await Notice("任务状态已变化","请等待当前任务完成后再回退。");return;}
 
   Interlocked.Increment(ref driverUiWorkflowCount);
   try

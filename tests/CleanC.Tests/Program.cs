@@ -69,9 +69,9 @@ sealed partial class Tests
    Check(!(scan with{EndedAt=clock.Now}).OfficialCheckSucceeded);
   });
   await Test("Offline revocation persists after restart",async()=>{
-   var st=new MemoryStore();var lease=Lease(true) with{RenewalProtocol="offline-v2",ExpiresAt=DateTimeOffset.MaxValue,LeaseHours=0};
+   var st=new MemoryStore();var lease=OfflineLease(true);
    var trusted=new TrustedTimeService(clock);trusted.AcceptOffline(lease,TimeSpan.Zero);
-   st.Write("offline-license.dat",new OfflineActivationRecord(lease));st.Write("trusted-time.dat",trusted.Snapshot(lease));
+   st.Write("offline-license.dat",new OfflineActivationRecord(lease,Envelope:OfflineEnvelope(lease)));st.Write("trusted-time.dat",trusted.Snapshot(lease));
    var m=Manager(new FakeApi(this){Error="LICENSE_DISABLED"},st);await m.InitializeAsync();Check(m.Context.State==LicenseState.Active);
    try{await m.RefreshAsync();}catch(LicenseException e){Check(e.Code=="LICENSE_DISABLED");}
    Check(m.Context.State==LicenseState.Suspended);
@@ -152,16 +152,16 @@ sealed partial class Tests
   await Test("Empty API configuration fails closed",async()=>{using var api=new LicenseApi(new(){BaseUrl=""});bool rejected=false;try{await api.Post(LicenseEndpoints.Activate,new{},CancellationToken.None);}catch(LicenseException e){rejected=e.Code=="API_NOT_CONFIGURED";}Check(rejected);});
   await Test("Browser cache index is optional structural file",()=>{var baseDir=Path.Combine(root,"browser","Cache");var rule=new CleanupRule("Chrome-Default-Cache",baseDir,"Chrome 浏览器缓存",TimeSpan.Zero);var p=new SafetyPolicy([rule]);Check(p.Classify(Snapshot(Path.Combine(baseDir,"Cache_Data","index")),DateTime.UtcNow).Safety==SafetyLevel.Optional);});
   await Test("Browser GPU data_3 is optional structural file",()=>{var baseDir=Path.Combine(root,"browser","GPUCache");var rule=new CleanupRule("Chrome-Default-GPUCache",baseDir,"Chrome 浏览器缓存",TimeSpan.Zero);var p=new SafetyPolicy([rule]);Check(p.Classify(Snapshot(Path.Combine(baseDir,"data_3")),DateTime.UtcNow).Safety==SafetyLevel.Optional);});
-  await Test("Old generic AppData cache is safe",()=>{var p=new SafetyPolicy();var path=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"CleanCTestUnknownApp","Cache","blob.bin");Check(p.Classify(Snapshot(path),DateTime.UtcNow).Safety==SafetyLevel.Safe);});
+  await Test("Old generic AppData cache is safe",()=>WithGenericCache(path=>Check(new SafetyPolicy().Classify(Snapshot(Path.Combine(path,"blob.bin")),DateTime.UtcNow).Safety==SafetyLevel.Safe)));
   await Test("Recycle bin remains protected from file-by-file scanner deletion",()=>{var p=new SafetyPolicy();var drive=Path.GetPathRoot(Environment.GetFolderPath(Environment.SpecialFolder.Windows))!;Check(p.ClassifyPath(Path.Combine(drive,"$Recycle.Bin"),true).Safety==SafetyLevel.Protected);});
   await Test("Image inside cache is user data for manual review",()=>{var baseDir=Path.Combine(root,"media-cache");var rule=new CleanupRule("Chrome-Test-Cache",baseDir,"浏览器缓存",TimeSpan.Zero);var p=new SafetyPolicy([rule]);Check(p.Classify(Snapshot(Path.Combine(baseDir,"photo.jpg")),DateTime.UtcNow).Safety==SafetyLevel.UserData);});
   await Test("Windows thumbnail cache is optional because it regenerates",()=>{var baseDir=Path.Combine(root,"explorer-cache");var rule=new CleanupRule("Windows-ThumbnailCache",baseDir,"Windows 缩略图缓存",TimeSpan.Zero,[".db"],"thumbcache_");var p=new SafetyPolicy([rule]);Check(p.Classify(Snapshot(Path.Combine(baseDir,"thumbcache_256.db")),DateTime.UtcNow).Safety==SafetyLevel.Optional);});
   await Test("Recent browser cache is optional",()=>{var baseDir=Path.Combine(root,"browser-recent","Cache");var rule=new CleanupRule("Chrome-Test-Cache",baseDir,"Chrome 浏览器缓存",TimeSpan.FromDays(7));Directory.CreateDirectory(baseDir);var p=new SafetyPolicy([rule]);Check(p.Classify(SnapshotAge(Path.Combine(baseDir,"entry.bin"),1),DateTime.UtcNow).Safety==SafetyLevel.Optional);});
   await Test("Browser cache older than seven days is safe",()=>{var baseDir=Path.Combine(root,"browser-old","Cache");var rule=new CleanupRule("Chrome-Test-Cache",baseDir,"Chrome 浏览器缓存",TimeSpan.FromDays(7));Directory.CreateDirectory(baseDir);var p=new SafetyPolicy([rule]);Check(p.Classify(SnapshotAge(Path.Combine(baseDir,"entry.bin"),10),DateTime.UtcNow).Safety==SafetyLevel.Safe);});
-  await Test("Recent generic app cache is optional",()=>{var p=new SafetyPolicy();var path=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"CleanCTestRecentApp","Cache","blob.bin");Check(p.Classify(SnapshotAge(path,1),DateTime.UtcNow).Safety==SafetyLevel.Optional);});
+  await Test("Recent generic app cache is optional",()=>WithGenericCache(path=>Check(new SafetyPolicy().Classify(SnapshotAge(Path.Combine(path,"blob.bin"),1),DateTime.UtcNow).Safety==SafetyLevel.Optional)));
   await Test("Executable in generic cache is protected",()=>{var p=new SafetyPolicy();var path=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"CleanCTestApp","Cache","helper.dll");Check(p.Classify(Snapshot(path),DateTime.UtcNow).Safety==SafetyLevel.Protected);});
   await Test("Database in generic cache is protected",()=>{var p=new SafetyPolicy();var path=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"CleanCTestStateApp","Cache","state.db");Check(p.Classify(Snapshot(path),DateTime.UtcNow).Safety==SafetyLevel.Protected);});
-  await Test("Cache index metadata is optional",()=>{var p=new SafetyPolicy();var path=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"CleanCTestIndexApp","Cache","index");Check(p.Classify(Snapshot(path),DateTime.UtcNow).Safety==SafetyLevel.Optional);});
+  await Test("Cache index metadata is optional",()=>WithGenericCache(path=>Check(new SafetyPolicy().Classify(Snapshot(Path.Combine(path,"index")),DateTime.UtcNow).Safety==SafetyLevel.Optional)));
   await Test("Active Claude local-agent session cache is optional",()=>{var p=new SafetyPolicy();var path=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Packages","Claude_test","LocalCache","Roaming","Claude","local-agent-mode-sessions","skills-plugin","spec.bin");Check(p.Classify(Snapshot(path),DateTime.UtcNow).Safety==SafetyLevel.Optional);});
   await Test("Missing selected file is resolved instead of skipped",async()=>{var p=Old("temp/gone-before-clean.tmp");var item=Item(p);File.Delete(p);var r=await Cleaner().ExecuteAsync([item],false,null,CancellationToken.None);Check(r.Skipped==0&&r.Deleted==0&&r.Items.Single().Result=="Gone");});
   await Test("Exit database cleanup preserves summaries and clears transient rows",()=>{
@@ -189,15 +189,23 @@ sealed partial class Tests
   });
   await RunMaintenanceTests();
   await Run171Tests();
+  await Run172Tests();
+  await RunOfflineMigrationTests();
   Console.WriteLine($"RESULT: {passed} passed, {Failed} failed. Fixtures: {root}");
  }
  Lease Lease(bool permanent=false)=>new(){Version=4,ApiVersion=3,LicenseId="license-test",DeviceId="DEVICE-TEST",Edition="Pro",LicenseType=permanent?"permanent":"duration",IsPermanent=permanent,CountdownRequired=!permanent,Features=["clean","scan","optimize"],IssuedAt=clock.SystemUtc,ServerTime=clock.SystemUtc,ExpiresAt=clock.SystemUtc.AddHours(72),LicenseExpiresAt=permanent?null:clock.SystemUtc.AddDays(7),LeaseHours=72,RenewalProtocol="challenge-refresh",Nonce="test-nonce"};
  SignedEnvelope Envelope(Lease lease){var raw=JsonSerializer.SerializeToUtf8Bytes(lease,SignatureVerifier.Json);return new(SignatureVerifier.Encode(raw),SignatureVerifier.Encode(key.SignData(raw,HashAlgorithmName.SHA256,DSASignatureFormat.IeeeP1363FixedFieldConcatenation)));}
- LicenseManager Manager(FakeApi handler,MemoryStore st,FakeClock? c=null)=>new(new LicenseApi(new(),handler),verifier,new FakeDevice(),st,c??clock,log);
+ LicenseManager Manager(FakeApi handler,MemoryStore st,FakeClock? c=null,UpgradeChannel channel=UpgradeChannel.Manual)=>new(new LicenseApi(new(),handler),verifier,new FakeDevice(),st,c??clock,log,channel);
  CleanupExecutor Cleaner()=>new(gate,policy,log);
  string Old(string relative){var p=Path.Combine(root,relative.Replace('/',Path.DirectorySeparatorChar));Directory.CreateDirectory(Path.GetDirectoryName(p)!);File.WriteAllText(p,"fixture");File.SetLastWriteTimeUtc(p,DateTime.UtcNow.AddDays(-10));File.SetCreationTimeUtc(p,DateTime.UtcNow.AddDays(-10));return p;}
  static FileSnapshot Snapshot(string p)=>new(p,7,DateTime.UtcNow.AddDays(-10),DateTime.UtcNow.AddDays(-10),FileAttributes.Normal);
  static FileSnapshot SnapshotAge(string p,int days)=>new(p,7,DateTime.UtcNow.AddDays(-days),DateTime.UtcNow.AddDays(-days),FileAttributes.Normal);
+ static void WithGenericCache(Action<string> test)
+ {
+  var owner=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"CleanC-rule-fixture-"+Guid.NewGuid().ToString("N"));
+  var cache=Path.Combine(owner,"Cache");Directory.CreateDirectory(cache);
+  try{test(cache);}finally{Directory.Delete(cache);Directory.Delete(owner);} // Only our empty, uniquely named fixture directories.
+ }
  static FileSnapshot Snap(string p){using var h=new PinnedFile(p);return h.Snapshot;}
  ScanItem Item(string p){var s=Snap(p);return new(1,s,policy.Classify(s,DateTime.UtcNow));}
  async Task Test(string name,Action action)=>await Test(name,()=>{action();return Task.CompletedTask;});
@@ -206,14 +214,14 @@ sealed partial class Tests
  static void Throws(Action action){try{action();}catch(LicenseException){return;}throw new Exception("Expected rejection");}
  sealed class FakeApi(Tests tests):HttpMessageHandler
  {
-  public List<string> Paths=[];public bool Permanent=true,Offline;public string? Error;
+  public List<string> Paths=[];public bool Permanent=true,Offline,WrongOfflineNonce;public string? Error;
   protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage r,CancellationToken ct){
    var path=r.RequestUri!.AbsolutePath.Replace("/api/v1/","");Paths.Add(path);if(Offline)throw new HttpRequestException();
    if(Error is not null)return Json(new{success=false,code=Error},HttpStatusCode.Forbidden);
    var body=JsonDocument.Parse(await r.Content!.ReadAsStringAsync(ct));
    Check(body.RootElement.GetProperty("deviceId").GetString()=="DEVICE-TEST");
    if(path is "device/challenge" or "offline/challenge")return Json(new{success=true,nonce="a-valid-nonce-for-test-only"});
-   if(path=="offline/refresh"){var signed=tests.Envelope(tests.Lease(Permanent));return Json(new{success=true,licenseKey="CLC-AAAA-BBBB-CCCC-DDDD",signedPayload=signed.SignedPayload,signature=signed.Signature});}
+   if(path=="offline/refresh"){Check(body.RootElement.GetProperty("signature").GetString()=="device-signature");var signed=tests.Envelope(tests.Lease(Permanent));var proof=WrongOfflineNonce?tests.SignObject(new OfflineCredential(1,"CleanC","offline-entitlement-v1",tests.OfflineLease(Permanent),"","","a-different-signed-nonce")):tests.OfflineEnvelope(tests.OfflineLease(Permanent));return Json(new{success=true,licenseKey="CLC-AAAA-BBBB-CCCC-DDDD",signedPayload=signed.SignedPayload,signature=signed.Signature,offlineProof=proof});}
    if(path=="license/refresh"){Check(body.RootElement.GetProperty("signature").GetString()=="device-signature");Check(body.RootElement.GetProperty("nonce").GetString()=="a-valid-nonce-for-test-only");}
    var env=tests.Envelope(tests.Lease(Permanent));return Json(new{success=true,signedPayload=env.SignedPayload,signature=env.Signature,lease=new{version=999}});
   }

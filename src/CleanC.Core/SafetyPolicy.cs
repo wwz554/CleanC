@@ -3,7 +3,7 @@ namespace CleanC.Core;
 public sealed record CleanupRule(string Id,string Root,string Label,TimeSpan MinimumAge,string[]? Extensions=null,string? NamePrefix=null);
 public sealed class SafetyPolicy
 {
- public const string Version="2026.09.25.170";
+ public const string Version="2026.10.03.172";
  readonly string[] systemReportRoots;
  readonly string cbsLogs;
  readonly string windows;
@@ -24,9 +24,10 @@ public sealed class SafetyPolicy
  readonly HashSet<string> criticalRootNames=new(StringComparer.OrdinalIgnoreCase){"bootmgr","bootnxt","ntldr","ntdetect.com","boot.ini","hiberfil.sys","pagefile.sys","swapfile.sys","dumpstack.log.tmp","memory.dmp"};
  public IReadOnlyList<CleanupRule> Rules=>rules;
  public bool IsVolatileRule(string? ruleId)=>!string.IsNullOrWhiteSpace(ruleId)&&(ruleId.StartsWith("Chrome-",StringComparison.OrdinalIgnoreCase)||ruleId.StartsWith("Edge-",StringComparison.OrdinalIgnoreCase)||ruleId.StartsWith("Firefox-",StringComparison.OrdinalIgnoreCase)||ruleId.StartsWith("AppCache:",StringComparison.OrdinalIgnoreCase)||ruleId.Equals("Windows-ThumbnailCache",StringComparison.OrdinalIgnoreCase));
- static readonly HashSet<string> Sensitive=new(StringComparer.OrdinalIgnoreCase){".exe",".dll",".sys",".msi",".msix",".vhd",".vhdx",".vmdk",".vdi",".qcow2",".gguf",".safetensors",".onnx",".pt",".pth",".ckpt",".git",".db",".sqlite",".sqlite3",".ini",".json",".config",".pem",".key",".pfx",".p12",".kdbx",".wallet",".env",".bak"};
+ static readonly HashSet<string> Sensitive=new(StringComparer.OrdinalIgnoreCase){".exe",".dll",".sys",".msi",".msix",".vhd",".vhdx",".vmdk",".vdi",".qcow2",".gguf",".safetensors",".onnx",".pt",".pth",".ckpt",".git",".db",".sqlite",".sqlite3",".ini",".json",".cleanc-license",".config",".pem",".key",".pfx",".p12",".kdbx",".wallet",".env",".bak"};
  static readonly HashSet<string> UserContentExtensions=new(StringComparer.OrdinalIgnoreCase){".jpg",".jpeg",".png",".gif",".bmp",".webp",".heic",".raw",".mp4",".mkv",".mov",".avi",".wmv",".flv",".webm",".mp3",".wav",".flac",".aac",".m4a",".doc",".docx",".xls",".xlsx",".ppt",".pptx",".pdf",".txt",".rtf",".csv",".md",".markdown",".psd",".ai",".fig",".sketch",".blend",".dwg",".dxf",".sql",".cs",".cpp",".c",".h",".hpp",".py",".js",".ts",".tsx",".jsx",".java",".go",".rs",".php",".html",".css",".xml",".yaml",".yml",".toml",".ipynb",".r",".rmd",".tex",".epub",".mobi",".pages",".numbers",".key",".odt",".ods",".odp",".zip",".7z",".rar",".tar",".gz"};
- static readonly HashSet<string> CacheDirectoryNames=new(StringComparer.OrdinalIgnoreCase){"cache","caches","code cache","gpucache","dawncache","shadercache","d3dscache","grshadercache","dxcache","glcache","computecache","nv_cache","localcache","tempstate","inetcache","media cache","media cache files","httpcache","http cache","imagecache","image cache","videocache","video cache","browsercache","browser cache","web cache","cef_cache","cachedata","cache_data","thumbnailcache","thumbnail cache","tmp","temp"};
+ // LocalCache is persistent packaged-app storage (including credentials), not a junk contract.
+ static readonly HashSet<string> CacheDirectoryNames=new(StringComparer.OrdinalIgnoreCase){"cache","caches","code cache","gpucache","dawncache","shadercache","d3dscache","grshadercache","dxcache","glcache","computecache","nv_cache","tempstate","inetcache","media cache","media cache files","httpcache","http cache","imagecache","image cache","videocache","video cache","browsercache","browser cache","web cache","cef_cache","cachedata","cache_data","thumbnailcache","thumbnail cache","tmp","temp"};
  static readonly TimeSpan RecentBrowserCacheAge=TimeSpan.FromDays(7);
  static readonly TimeSpan RecentAppCacheAge=TimeSpan.FromDays(7);
  static readonly HashSet<string> ExecutableStateExtensions=new(StringComparer.OrdinalIgnoreCase){".exe",".dll",".sys",".msi",".msix",".appx",".appxbundle",".msixbundle",".com",".bat",".cmd",".ps1"};
@@ -43,7 +44,8 @@ public sealed class SafetyPolicy
   localProgramsRoot=Path.Combine(local,"Programs");
   var profile=Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
   var programData=Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-  systemReportRoots=[Path.Combine(programData,@"Microsoft\Windows\WER\ReportArchive"),Path.Combine(programData,@"Microsoft\Windows\WER\ReportQueue")];
+  systemReportRoots=[Path.Combine(programData,@"Microsoft\Windows\WER\ReportArchive"),Path.Combine(programData,@"Microsoft\Windows\WER\ReportQueue"),
+   Path.Combine(local,@"Microsoft\Windows\WER\ReportArchive"),Path.Combine(local,@"Microsoft\Windows\WER\ReportQueue")];
   cbsLogs=Path.Combine(windows,@"Logs\CBS");
   var systemDrive=Path.GetPathRoot(windows)!;
   var localLow=Path.Combine(profile,"AppData","LocalLow");
@@ -125,6 +127,7 @@ public sealed class SafetyPolicy
    new("shader",Path.Combine(local,"D3DSCache"),"DirectX 着色器缓存",TimeSpan.FromDays(30)),
    new("shader-nvidia-dx",Path.Combine(local,@"NVIDIA\DXCache"),"NVIDIA DirectX 着色器缓存",TimeSpan.FromDays(30)),
    new("shader-nvidia-gl",Path.Combine(local,@"NVIDIA\GLCache"),"NVIDIA OpenGL 着色器缓存",TimeSpan.FromDays(30)),
+   new("shader-nvidia-compute",Path.Combine(roaming,@"NVIDIA\ComputeCache"),"NVIDIA CUDA 编译缓存",TimeSpan.FromDays(30)),
    new("shader-amd-dx",Path.Combine(local,@"AMD\DxCache"),"AMD DirectX 着色器缓存",TimeSpan.FromDays(30)),
    new("shader-amd-dxc",Path.Combine(local,@"AMD\DxcCache"),"AMD 编译着色器缓存",TimeSpan.FromDays(30)),
    new("wer",Path.Combine(local,@"Microsoft\Windows\WER\ReportArchive"),"已归档错误报告",TimeSpan.FromDays(14)),
@@ -171,7 +174,7 @@ public sealed class SafetyPolicy
   }
   if(IsActiveRuntimeCachePath(p))
    return new(SafetyLevel.Optional,"活动会话缓存","运行中的应用会频繁创建、移动或重建这些会话文件；默认暂不清理，避免扫描后路径立即失效","active-runtime-cache");
-  if(TryKnownAppCacheRoot(p,out var appCacheRoot))
+  if(TryKnownAppCacheRoot(p,out var appCacheRoot,isDirectory))
   {
    if(!isDirectory&&UserContentExtensions.Contains(Path.GetExtension(p)))return new(SafetyLevel.UserData,"应用缓存中的个人文件","检测到图片、视频、文档或压缩包；默认保留，由用户确认","AppCache:"+appCacheRoot);
    return new(SafetyLevel.Optional,"应用缓存","缓存目录本身可能正在被程序使用；文件按年龄和类型逐项判断","AppCache:"+appCacheRoot);
@@ -252,6 +255,8 @@ public sealed class SafetyPolicy
   if(TryKnownAppCacheRoot(p,out var appCacheRoot))
   {
    var cacheRule="AppCache:"+appCacheRoot;
+   if(PortableWithin(p,appCacheRoot,fresh,sessionMarkers))
+    return new(SafetyLevel.Protected,"软件 / 项目","缓存目录内发现程序或项目标记，不能作为普通缓存自动清理",cacheRule);
    if(UserContentExtensions.Contains(ext))return new(SafetyLevel.UserData,"应用缓存中的个人文件","检测到图片、视频、文档或压缩包；默认保留，由用户确认",cacheRule);
    if(ExecutableStateExtensions.Contains(ext)||Sensitive.Contains(ext))
     return new(SafetyLevel.Protected,"应用程序文件","缓存目录中出现程序、驱动、模型或虚拟磁盘文件，无法证明可安全删除",cacheRule);
@@ -293,14 +298,22 @@ public sealed class SafetyPolicy
   result=new(SafetyLevel.Protected,"系统诊断数据","仅明确的旧报告和已轮转日志允许清理");
   var report=systemReportRoots.Any(root=>Within(path,root));
   var cbs=Within(path,cbsLogs);
-  if(!report&&!cbs)return false;
-  // Do not whitelist all of ProgramData, Windows\Logs, current CBS.log or report attachments.
+  var dism=Within(path,Path.Combine(windows,@"Logs\DISM"));
+  var kernelDump=Within(path,Path.Combine(windows,"Minidump"))||Within(path,Path.Combine(windows,"LiveKernelReports"))||
+   path.Equals(Path.Combine(windows,"MEMORY.DMP"),StringComparison.OrdinalIgnoreCase);
+  var crashpad=!protectedRoots.Any(root=>Within(path,root))&&appDataRoots.Any(root=>Within(path,root))&&
+   System.Text.RegularExpressions.Regex.IsMatch(path,@"\\Crashpad\\(?:reports|pending|completed)\\[^\\]+\.dmp$",System.Text.RegularExpressions.RegexOptions.IgnoreCase|System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+  if(!report&&!cbs&&!dism&&!kernelDump&&!crashpad)return false;
+  // Exact diagnostic formats only: never whitelist their entire parent or attachments.
   var name=Path.GetFileName(path);var ext=Path.GetExtension(path);
   var accepted=report?new[]{".wer",".dmp",".hdmp",".cab"}.Contains(ext,StringComparer.OrdinalIgnoreCase)
-   :System.Text.RegularExpressions.Regex.IsMatch(name,@"^CbsPersist_\d+(?:_\d+)?\.(?:cab|log)$",System.Text.RegularExpressions.RegexOptions.IgnoreCase|System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+   :cbs?System.Text.RegularExpressions.Regex.IsMatch(name,@"^CbsPersist_\d+(?:_\d+)?\.(?:cab|log)$",System.Text.RegularExpressions.RegexOptions.IgnoreCase|System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+   :dism?name.Equals("dism.log.bak",StringComparison.OrdinalIgnoreCase)&&Path.GetDirectoryName(path)!.Equals(Path.Combine(windows,@"Logs\DISM"),StringComparison.OrdinalIgnoreCase)
+   :ext.Equals(".dmp",StringComparison.OrdinalIgnoreCase);
   if(!accepted)return true;
-  var age=TimeSpan.FromDays(report?14:30);var id=report?"system-wer":"system-cbs-archive";
-  var label=report?"系统旧错误报告":"Windows 已轮转组件日志";
+  var age=TimeSpan.FromDays(crashpad?7:report||kernelDump?14:30);
+  var id=report?"system-wer":cbs?"system-cbs-archive":dism?"system-dism-archive":kernelDump?"system-kernel-dump":"app-crashpad";
+  var label=report?"旧错误报告":cbs?"Windows 已轮转组件日志":dism?"Windows 已轮转维护日志":kernelDump?"Windows 旧崩溃转储":"应用旧崩溃报告";
   result=new(snapshot is not null&&!IsRecent(snapshot,utcNow,age)?SafetyLevel.Safe:SafetyLevel.Optional,label,
    "仅清理明确诊断文件；保留近期报告、当前日志及不匹配的附件。删除后无法用该旧报告排障。",id);
   return true;
@@ -432,7 +445,7 @@ public sealed class SafetyPolicy
   return false;
  }
 
- bool TryKnownAppCacheRoot(string path,out string root)
+ bool TryKnownAppCacheRoot(string path,out string root,bool isDirectory=false)
  {
   root="";
   foreach(var baseRoot in new[]{localAppData,roamingAppData,localLowAppData})
@@ -442,7 +455,7 @@ public sealed class SafetyPolicy
    if(parts.Length<2)continue;
    // Check every descendant before accepting a cache ancestor: a directory name is not proof of disposable data.
    if(parts.Any(IsPersistentStateDirectory))return false;
-   for(var i=1;i<parts.Length;i++)
+   for(var i=1;i<parts.Length-(isDirectory?0:1);i++)
    {
     if(parts[i].Equals("CacheStorage",StringComparison.OrdinalIgnoreCase)||parts[i].Equals("Service Worker",StringComparison.OrdinalIgnoreCase)||parts[i].Equals("IndexedDB",StringComparison.OrdinalIgnoreCase)||parts[i].Equals("Local Storage",StringComparison.OrdinalIgnoreCase)||parts[i].Equals("Session Storage",StringComparison.OrdinalIgnoreCase))return false;
     if(!CacheDirectoryNames.Contains(parts[i]))continue;

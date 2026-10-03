@@ -296,7 +296,7 @@ public sealed partial class MainWindow : Window
  void RenderPage()
  {
   if(databaseMaintenanceRunning){ShowDatabaseMaintenancePage("正在完成退出前数据库维护，维护结束后即可继续使用。");return;}
-  if(!initialized){pageHost.Content=Ui.Stack(20,Ui.T("正在本地验证授权…",20,true));return;}
+  if(!initialized){pageHost.Content=Ui.Stack(20,Ui.T("正在验证已有授权…",20,true),Ui.T("升级验证会自动完成，请稍候。",13,false,Ui.Muted));return;}
   if(services.License.Context.State!=LicenseState.Active&&!RepairBackgroundWorkRunning&&!DriverBackgroundWorkRunning){ShowActivation();return;}
   if(activationShellBackground is not null){shell.Background=activationShellBackground;activationShellBackground=null;}
   pageHost.VerticalContentAlignment=VerticalAlignment.Top;
@@ -737,10 +737,22 @@ public sealed partial class MainWindow : Window
   pageHost.Content = new ActivationPage(
    services.License.BeginOfflineActivation,
    async key => { await services.License.ActivateAsync(key); await TransitionContentAsync(RenderPage,false,false); },
-   async code => { await services.License.CompleteOfflineActivationAsync(code); await TransitionContentAsync(RenderPage,false,false); },
+   async (code,credential) => { await services.License.CompleteOfflineActivationAsync(code,credential); await TransitionContentAsync(RenderPage,false,false); },
    CopyDevice,
-   services.License.Context.Lease is null?null:services.License.Context.StatusText,
-   async()=>{await services.License.RefreshAsync();if(services.License.Context.State!=LicenseState.Active)throw new InvalidOperationException(services.License.Context.StatusText);await TransitionContentAsync(RenderPage,false,false);});
+   SelectOfflineCredentialAsync,
+   services.License.Context.State==LicenseState.Uninitialized?null:string.IsNullOrWhiteSpace(services.License.LastError)?services.License.Context.StatusText:services.License.LastError,
+   services.License.CanValidateExisting?async()=>{await services.License.RefreshAsync();if(services.License.Context.State!=LicenseState.Active)throw new InvalidOperationException(services.License.Context.StatusText);await TransitionContentAsync(RenderPage,false,false);}:null);
+ }
+ async Task<string?> SelectOfflineCredentialAsync()
+ {
+  // Windows App SDK 1.8 picker supports the elevated desktop app.
+  var picker=new Microsoft.Windows.Storage.Pickers.FileOpenPicker(AppWindow.Id){CommitButtonText="导入签名凭证"};
+  picker.FileTypeFilter.Add(".cleanc-license");picker.FileTypeFilter.Add(".json");
+  var file=await picker.PickSingleFileAsync();if(file is null)return null;
+  using var stream=new FileStream(file.Path,FileMode.Open,FileAccess.Read,FileShare.Read);
+  if(stream.Length>OfflineCredentialFile.MaximumBytes)throw new LicenseException("CREDENTIAL_INVALID","凭证文件过大，请选择手机网页下载的文件。");
+  using var reader=new StreamReader(stream,new System.Text.UTF8Encoding(false,true));
+  var text=await reader.ReadToEndAsync();OfflineCredentialFile.Parse(text);return text;
  }
  void CopyDevice(){var data=new Windows.ApplicationModel.DataTransfer.DataPackage();data.SetText(services.License.DeviceId);Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(data);SetStatus("设备码已复制。");}
  void ShowOverview()
