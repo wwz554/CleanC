@@ -8,12 +8,13 @@ on:
   workflow_dispatch:
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 permissions:
   contents: write
 jobs:
   windows:
     runs-on: windows-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -42,6 +43,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (-not (Test-Path artifacts/publish/CleanC.pri)) { throw 'Missing WinUI resources' }
       - name: Installer install, reinstall and uninstall smoke (ephemeral runner only)
+        timeout-minutes: 5
         shell: pwsh
         run: |
           $target = Join-Path $env:RUNNER_TEMP ('CleanC-UPDATE-install-smoke-' + [guid]::NewGuid().ToString('N'))
@@ -53,7 +55,9 @@ jobs:
           foreach ($attempt in 1..2) {
             $setupArgs = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',("/DIR=`"$target`""))
             if ($attempt -eq 2) { $setupArgs += '/UPDATE' }
-            $setup = Start-Process -FilePath (Resolve-Path artifacts/installer/CleanC-Setup.exe) -ArgumentList $setupArgs -WindowStyle Hidden -Wait -PassThru
+            # Wait only for the installer, not its intentionally long-lived app child.
+            $setup = Start-Process -FilePath (Resolve-Path artifacts/installer/CleanC-Setup.exe) -ArgumentList $setupArgs -WindowStyle Hidden -PassThru
+            if (-not $setup.WaitForExit(120000)) { throw 'Installer did not exit within two minutes' }
             if ($setup.ExitCode -ne 0) { throw "Installer exit $($setup.ExitCode)" }
             if (-not (Test-Path -LiteralPath (Join-Path $target 'CleanC.pri'))) { throw 'Installed resources missing' }
             [xml]$props = Get-Content Directory.Build.props
