@@ -1,7 +1,7 @@
 {
-  "notes": "CleanC 1.7.2",
-  "size": 62399314,
-  "sha256": "a3ff2895d9c971f76b00c68baeead533ea2b6b11e75c14f30b88e1d2f2ea743d",
-  "version": "1.7.2",
-  "url": "https://github.com/wwz554/CleanC/releases/download/v1.7.2/CleanC-Setup.exe"
+  "sha256": "345e6e5ee9b7623b7501af1b3a622d498154b60b9c27f7651c5b0b7f2c664870",
+  "version": "1.7.3",
+  "notes": "CleanC 1.7.3",
+  "size": 62445293,
+  "url": "https://github.com/wwz554/CleanC/releases/download/v1.7.3/CleanC-Setup.exe"
 }
