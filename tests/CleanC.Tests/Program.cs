@@ -192,6 +192,7 @@ sealed partial class Tests
   await Run172Tests();
   await RunOfflineMigrationTests();
   await Run173Tests();
+  await Run174Tests();
   Console.WriteLine($"RESULT: {passed} passed, {Failed} failed. Fixtures: {root}");
  }
  Lease Lease(bool permanent=false)=>new(){Version=4,ApiVersion=3,LicenseId="license-test",DeviceId="DEVICE-TEST",Edition="Pro",LicenseType=permanent?"permanent":"duration",IsPermanent=permanent,CountdownRequired=!permanent,Features=["clean","scan","optimize"],IssuedAt=clock.SystemUtc,ServerTime=clock.SystemUtc,ExpiresAt=clock.SystemUtc.AddHours(72),LicenseExpiresAt=permanent?null:clock.SystemUtc.AddDays(7),LeaseHours=72,RenewalProtocol="challenge-refresh",Nonce="test-nonce"};

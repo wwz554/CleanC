@@ -63,7 +63,7 @@ sealed partial class Tests
   await Test("Native memory diagnostics only, no process trimming",()=>{
    var memory=new MemoryService(gate,log);var snapshot=memory.Read();
    Check(snapshot.Physical>0&&snapshot.Available<=snapshot.Physical&&snapshot.CommitLimit>=snapshot.Commit);
-   var targets=memory.Analyze();Check(targets.Count<=20&&targets.All(x=>x.Started>0&&x.Path.Length>0));
+   var targets=memory.Analyze();Check(targets.Count<=40&&targets.All(x=>x.Started>0&&x.Path.Length>0&&x.PrivateBytes>=0));
   });
   if(Environment.GetEnvironmentVariable("CLEANC_WUA_TESTS")=="1")
   await Test("Real WUA asynchronous cached search (read only)",()=>{

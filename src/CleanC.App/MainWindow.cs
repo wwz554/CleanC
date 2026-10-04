@@ -118,7 +118,7 @@ public sealed partial class MainWindow : Window
   var navHost=new Grid();
   navIndicator=new Border{Height=48,VerticalAlignment=VerticalAlignment.Top,CornerRadius=new CornerRadius(17),Background=Ui.NavigationGlassBrush(),BorderBrush=new SolidColorBrush(Colors.Transparent),BorderThickness=new Thickness(0),IsHitTestVisible=false,Opacity=.94};
   navHost.Children.Add(navIndicator);
-  foreach(var (name,glyph,id) in new[]{("概览","\uE80F","overview"),("智能清理","\uE74D","clean"),("空间分析","\uE9D9","space"),("驱动修复","\uE950","driver"),("系统修复","\uE90F","repair"),("设置","\uE713","settings")}){
+  foreach(var (name,glyph,id) in new[]{("概览","\uE80F","overview"),("智能清理","\uE74D","clean"),("空间分析","\uE9D9","space"),("内存分析与回收","\uE964","memory"),("驱动修复","\uE950","driver"),("系统修复","\uE90F","repair"),("设置","\uE713","settings")}){
    var button=Ui.Button("",()=>Navigate(id));button.Content=Ui.Row(16,Ui.Icon(glyph,18),Ui.T(name,14));button.HorizontalAlignment=HorizontalAlignment.Stretch;button.Height=48;button.Tag=id;button.Background=new SolidColorBrush(Colors.Transparent);button.CornerRadius=new CornerRadius(16);button.Opacity=Equals(id,currentPage)?1:.91;
    button.PointerEntered+=(_,_)=>{button.Opacity=.98;if(!Equals(button.Tag,currentPage))button.Background=Ui.NavigationHoverBrush();};
    button.PointerPressed+=(_,_)=>{button.Opacity=1;if(!Equals(button.Tag,currentPage))button.Background=Ui.NavigationPressedBrush();};
@@ -184,6 +184,7 @@ public sealed partial class MainWindow : Window
 
  async Task TransitionContentAsync(Action render,bool preserveScroll=false,bool subtle=false,int expectedVersion=-1)
  {
+  if(expectedVersion<0)expectedVersion=navigationTransitionVersion;
   await pageTransitionGate.WaitAsync();
   try
   {
@@ -216,11 +217,13 @@ public sealed partial class MainWindow : Window
   if(activationShellBackground is not null){shell.Background=activationShellBackground;activationShellBackground=null;}
   pageHost.VerticalContentAlignment=VerticalAlignment.Top;
   if(pageScroll is not null){pageScroll.VerticalScrollBarVisibility=ScrollBarVisibility.Auto;pageScroll.VerticalScrollMode=ScrollMode.Auto;}
-  switch(currentPage){case "clean":ShowCleanup();break;case "space":ShowSpace(vm.ScanRoot);break;case "driver":ShowDrivers();break;case "repair":ShowRepair();break;case "settings":ShowSettings();break;default:ShowOverview();break;}
+  switch(currentPage){case "clean":ShowCleanup();break;case "space":ShowSpace(vm.ScanRoot);break;case "memory":ShowMemory();break;case "driver":ShowDrivers();break;case "repair":ShowRepair();break;case "settings":ShowSettings();break;default:ShowOverview();break;}
  }
  void OnTimerTick()
  {
   if(CleanupCacheBuildInProgress)UpdateCacheProgress();
+  if(currentPage=="driver")SyncDriverScanVisual();
+  if(currentPage=="memory")UpdateMemorySnapshot();
   if(!initialized)return;
   UpdateLicenseDisplay();
   if(!tickBusy)_=RunLicenseMaintenanceAsync();
@@ -327,6 +330,7 @@ public sealed partial class MainWindow : Window
   if(cleanupRunning)currentPage="clean";
   else if(ComponentWorkRunning)currentPage="clean";
   else if(DriverBackgroundWorkRunning){currentPage="driver";driverViewCache=null;}
+  else if(memoryBusy)currentPage="memory";
   else if(RepairBackgroundWorkRunning){currentPage="repair";repairViewCache=null;}
   else if(fileMoveRunning)currentPage="space";
   else if(scanRunning)currentPage="clean";
@@ -337,6 +341,7 @@ public sealed partial class MainWindow : Window
   if(cleanupRunning)SetStatus("清理仍在后台执行。");
   else if(ComponentWorkRunning)SetStatus(componentStatus);
   else if(DriverBackgroundWorkRunning)SetStatus("驱动任务仍在后台执行，已恢复真实进度。");
+  else if(memoryBusy)SetStatus("内存诊断或回收仍在执行，已恢复独立内存页。");
   else if(RepairBackgroundWorkRunning)SetStatus("系统检查 / 修复仍在后台执行，已恢复真实进度。");
   else if(fileMoveRunning)SetStatus("文件处理仍在后台执行。");
   else if(scanRunning)SetStatus(scanCancellation?.IsCancellationRequested==true?"C 盘扫描正在协作停止…":"C 盘扫描仍在运行。");
@@ -354,6 +359,7 @@ public sealed partial class MainWindow : Window
   // Stage 1: UI disappears immediately.
   try{AppWindow.Hide();}catch{}
   timer.Stop();
+  memoryObservationCancellation?.Cancel(); // A read-only observation must not delay exit for 60 seconds.
 
   // Keep the current scan-generation Smart Clean cache alive while the process is
   // only hidden. Driver/repair/cleanup tasks may continue for a long time and a
