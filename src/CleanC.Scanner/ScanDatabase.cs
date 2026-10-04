@@ -7,6 +7,8 @@ public readonly record struct ExitDatabaseCleanupResult(
 public sealed class ScanDatabase
 {
  public string DatabasePath{get;}
+ readonly System.Collections.Concurrent.ConcurrentDictionary<string,string> sharedLabels=new(StringComparer.Ordinal);
+ string SharedText(string value)=>sharedLabels.TryGetValue(value,out var existing)?existing:sharedLabels.Count<512?sharedLabels.GetOrAdd(value,value):value;
  public ScanDatabase(string? path=null)
  {
   DatabasePath=path??Path.Combine(AppPaths.UserData,"Data","CleanC.db");
@@ -107,7 +109,7 @@ public sealed class ScanDatabase
   c.Parameters.AddWithValue("$first",firstId);c.Parameters.AddWithValue("$last",lastId);
   using var r=c.ExecuteReader();var result=new List<ScanItem>();while(r.Read()){token.ThrowIfCancellationRequested();result.Add(Read(r));}return result;
  }
- static ScanItem Read(SqliteDataReader r)=>new(r.GetInt64(0),new(r.GetString(1),r.GetInt64(2),new DateTime(r.GetInt64(3),DateTimeKind.Utc),new DateTime(r.GetInt64(4),DateTimeKind.Utc),(FileAttributes)r.GetInt64(5),ulong.TryParse(r.GetString(6),out var id)?id:0,(uint)r.GetInt64(7),(uint)r.GetInt64(8)),new((SafetyLevel)r.GetInt32(9),r.GetString(10),r.GetString(11),r.IsDBNull(12)?null:r.GetString(12)),r.GetInt32(13)==1);
+ ScanItem Read(SqliteDataReader r)=>new(r.GetInt64(0),new(r.GetString(1),r.GetInt64(2),new DateTime(r.GetInt64(3),DateTimeKind.Utc),new DateTime(r.GetInt64(4),DateTimeKind.Utc),(FileAttributes)r.GetInt64(5),ulong.TryParse(r.GetString(6),out var id)?id:0,(uint)r.GetInt64(7),(uint)r.GetInt64(8)),new((SafetyLevel)r.GetInt32(9),SharedText(r.GetString(10)),SharedText(r.GetString(11)),r.IsDBNull(12)?null:r.GetString(12)),r.GetInt32(13)==1);
  public long SelectedBytes(){using var db=Open();using var c=db.CreateCommand();c.CommandText="SELECT COALESCE(SUM(size),0) FROM entries WHERE selected=1 AND isdir=0";return Convert.ToInt64(c.ExecuteScalar());}
  public int SelectedCount(){using var db=Open();using var c=db.CreateCommand();c.CommandText="SELECT COUNT(*) FROM entries WHERE selected=1 AND isdir=0";return Convert.ToInt32(c.ExecuteScalar());}
  public void Select(long id,bool selected){using var db=Open();using var c=db.CreateCommand();c.CommandText="UPDATE entries SET selected=$s WHERE id=$id AND safety IN (0,1,2) AND isdir=0";c.Parameters.AddWithValue("$s",selected?1:0);c.Parameters.AddWithValue("$id",id);c.ExecuteNonQuery();}

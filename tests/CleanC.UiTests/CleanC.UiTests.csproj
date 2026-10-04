@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+ <PropertyGroup><OutputType>WinExe</OutputType><TargetFramework>net8.0-windows10.0.19041.0</TargetFramework><TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion><UseWinUI>true</UseWinUI><WindowsPackageType>None</WindowsPackageType><WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained><RuntimeIdentifier>win-x64</RuntimeIdentifier><Platforms>x64</Platforms><AssemblyName>CleanC.UiTests</AssemblyName></PropertyGroup>
+ <ItemGroup><ProjectReference Include="../../src/CleanC.App/CleanC.App.csproj"/><Page Remove="TestApp.xaml"/><ApplicationDefinition Include="TestApp.xaml"/></ItemGroup>
+</Project>

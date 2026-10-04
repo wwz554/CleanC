@@ -33,8 +33,10 @@ public sealed class ComponentStoreService
  {
   gate.Demand(FeatureCapability.Scan);
   if(!host.IsAdministrator)return Unavailable(740,"需要管理员权限才能读取 Windows 组件存储；未将未知占用算作垃圾。","");
-  using var lease=MaintenanceLock.Enter();
-  Interlocked.Exchange(ref running,1);
+  if(MaintenanceLock.IsHeld)throw new InvalidOperationException("其他维护任务正在运行，稍后重试组件分析。");
+  // Analysis is read-only; it must not monopolize the file-cleanup write lease.
+  // Windows component/driver writes remain serialized by their maintenance lease.
+  if(Interlocked.CompareExchange(ref running,1,0)!=0)throw new InvalidOperationException("组件分析或清理已经在运行。");
   try{return await AnalyzeCore(progress).ConfigureAwait(false);}
   finally{Interlocked.Exchange(ref running,0);}
  }
@@ -49,7 +51,7 @@ public sealed class ComponentStoreService
   gate.Demand(FeatureCapability.Cleanup);
   if(!host.IsAdministrator)throw new UnauthorizedAccessException("Windows 组件清理需要管理员权限。");
   using var lease=MaintenanceLock.Enter();
-  Interlocked.Exchange(ref running,1);
+  if(Interlocked.CompareExchange(ref running,1,0)!=0)throw new InvalidOperationException("组件分析或清理已经在运行。");
   try
   {
    // Never trust the stale UI report when making a servicing decision.
@@ -118,7 +120,16 @@ sealed class WindowsComponentStoreHost:IComponentStoreHost
   process.Start();
   var stage=arguments==ComponentStoreService.CleanupArguments?"Windows 组件清理":"Windows 组件分析";
   var stdout=ComponentCommandOutput.ReadAsync(process.StandardOutput,stage,progress);var stderr=process.StandardError.ReadToEndAsync();
-  await process.WaitForExitAsync().ConfigureAwait(false);
+  if(arguments==ComponentStoreService.AnalyzeArguments){
+   try{await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(180)).ConfigureAwait(false);}
+   catch(TimeoutException){
+    // This fixed command is read-only. NEVER apply this kill policy to servicing.
+    if(!process.HasExited)process.Kill(entireProcessTree:true);
+    await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+    await stdout.ConfigureAwait(false);await stderr.ConfigureAwait(false);
+    return(1460,"Windows 组件只读分析超过 180 秒，已停止分析。普通文件结果仍可使用；稍后重新扫描可重试。");
+   }
+  }else await process.WaitForExitAsync().ConfigureAwait(false);
   return(process.ExitCode,(await stdout.ConfigureAwait(false))+Environment.NewLine+(await stderr.ConfigureAwait(false)));
  }
 }

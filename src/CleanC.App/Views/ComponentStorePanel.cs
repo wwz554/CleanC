@@ -43,7 +43,10 @@ public sealed partial class MainWindow
    componentSelected=ComponentEligible;
   }
   catch(Exception e){componentAnalysis=null;componentStatus="组件分析未完成："+e.Message;services.Log.Write("ComponentStore","ScanAnalysis","Failed",detail:e.GetType().Name);}
-  finally{Interlocked.Decrement(ref componentUiTasks);RefreshComponentPanel();TryFinishPendingClose();}
+  finally{
+   Interlocked.Decrement(ref componentUiTasks);RefreshComponentPanel();UpdateSelectionSummaryVisual();TryFinishPendingClose();
+   if(currentPage=="clean"&&!scanRunning&&!cleanupRunning&&!cleanupPreparing&&!closingPending)await TransitionContentAsync(()=>ShowCleanup(),true,true);
+  }
  }
  async Task<ComponentCleanupResult> RunSelectedComponentCleanup()
  {
