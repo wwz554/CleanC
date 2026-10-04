@@ -32,6 +32,18 @@ jobs:
         run: dotnet run --project tests/CleanC.Tests -c Release --no-build
       - name: QR decoding regression
         run: dotnet run --project tests/CleanC.QrTests -c Release
+      - name: Real WinUI navigation and offline-input regressions (isolated fixtures)
+        timeout-minutes: 4
+        shell: pwsh
+        run: |
+          dotnet build tests/CleanC.UiTests -c Release -p:Platform=x64
+          if ($LASTEXITCODE -ne 0) { throw 'UI fixture build failed' }
+          $exe = Resolve-Path 'tests/CleanC.UiTests/bin/x64/Release/net8.0-windows10.0.19041.0/win-x64/CleanC.UiTests.exe'
+          $ui = Start-Process -FilePath $exe -WindowStyle Hidden -PassThru
+          if (-not $ui.WaitForExit(60000)) { throw 'UI fixture did not exit within 60 seconds' }
+          $fixture = Get-ChildItem -LiteralPath $env:TEMP -Directory -Filter 'CleanC-ui-tests-*' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if ($fixture -and (Test-Path (Join-Path $fixture.FullName 'result.txt'))) { Get-Content (Join-Path $fixture.FullName 'result.txt') }
+          if ($ui.ExitCode -ne 0) { throw "UI fixture exit $($ui.ExitCode)" }
       - name: Publish
         run: dotnet publish src/CleanC.App/CleanC.App.csproj -c Release -p:Platform=x64 -p:WindowsAppSDKSelfContained=true -p:PublishSingleFile=false -r win-x64 --self-contained true -o artifacts/publish
       - name: Installer

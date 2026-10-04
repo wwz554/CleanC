@@ -731,12 +731,15 @@ public sealed partial class MainWindow
   };
  }
 
+ CancellationTokenSource? driverScanCancellation;
  void ShowDriverProgress()
  {
   if(driverProgressView is null)
   {
    driverStageText=Ui.T(driverUiStage,22,true);driverProgressText=Ui.T($"{driverUiPercent:0}%",13,true,Ui.DriverAccent);driverProgressBar=new ProgressBar{Minimum=0,Maximum=100,Value=driverUiPercent,Height=8,Foreground=Ui.DriverAccent,HorizontalAlignment=HorizontalAlignment.Stretch};
-   driverProgressView=Ui.Stack(24,Heading("DRIVER HEALTH",driverUiInstalling?"正在安装驱动":"正在全面扫描驱动","任务在后台执行，界面和授权倒计时仍可正常使用。"),Ui.GlassCard(Ui.Stack(14,driverStageText,driverProgressBar,driverProgressText),new Thickness(22)));
+   var content=Ui.Stack(14,driverStageText,driverProgressBar,driverProgressText);
+   if(!driverUiInstalling)content.Children.Add(Ui.Button("停止本次扫描",()=>driverScanCancellation?.Cancel()));
+   driverProgressView=Ui.Stack(24,Heading("DRIVER HEALTH",driverUiInstalling?"正在安装驱动":"正在全面扫描驱动","任务在后台执行；切换页面不会停止任务，官方在线查询最多等待 120 秒。"),Ui.GlassCard(content,new Thickness(22)));
   }
   UpdateDriverProgress();pageHost.Content=driverProgressView;
  }
@@ -748,12 +751,14 @@ public sealed partial class MainWindow
   Interlocked.Increment(ref driverUiWorkflowCount);
   try
   {
-   driverUiInstalling=false;driverUiPercent=0;driverUiStage="正在准备驱动扫描";driverProgressView=null;driverViewCache=null;await TransitionContentAsync(()=>ShowDriverProgress(),false,true);await Task.Yield();
+   driverScanCancellation=new();driverUiInstalling=false;driverUiPercent=0;driverUiStage="正在准备驱动扫描";driverProgressView=null;driverViewCache=null;await TransitionContentAsync(()=>ShowDriverProgress(),false,true);await Task.Yield();
    using var progress=new DispatcherProgress<DriverProgress>(DispatcherQueue,p=>{driverUiPercent=p.Percent;driverUiStage=p.Stage;UpdateDriverProgress();},e=>services.Log.Write("Drivers","UiProgress","Failed",detail:e.ToString()));
-   driverScanResult=await services.Drivers.ScanAsync(progress);driverUiPercent=100;driverUiStage=driverScanResult.OfficialCheckSucceeded?"扫描完成":"本机检测完成 · 在线检查未完成";driverExpandedCategories.Clear();driverExpandedSummaries.Clear();driverOperations.Clear();driverRollbackCandidates.Clear();driverLocalBackups.Clear();foreach(var d in driverScanResult.Devices){var b=services.Drivers.FindLatestBackup(d.DeviceId);if(b is not null){driverLocalBackups[d.DeviceId]=b;if(d.Health is DriverHealth.Missing or DriverHealth.Problem)services.Drivers.ProtectBackup(b,"全面扫描发现该设备仍异常，保留用于回退");else services.Drivers.TryReleasePendingRestartProtection(b,true,"Windows 已重启且全面扫描确认设备正常");}}SetStatus(driverScanResult.OfficialCheckWarning??$"驱动扫描完成 · {driverScanResult.Devices.Count:N0} 个设备 · {driverScanResult.UpgradeableCount:N0} 个可升级");
+   driverScanResult=await services.Drivers.ScanAsync(progress,driverScanCancellation.Token);driverUiPercent=100;driverUiStage=driverScanResult.OfficialCheckSucceeded?"扫描完成":"本机检测完成 · 在线检查未完成";driverExpandedCategories.Clear();driverExpandedSummaries.Clear();driverOperations.Clear();driverRollbackCandidates.Clear();driverLocalBackups.Clear();foreach(var d in driverScanResult.Devices){var b=services.Drivers.FindLatestBackup(d.DeviceId);if(b is not null){driverLocalBackups[d.DeviceId]=b;if(d.Health is DriverHealth.Missing or DriverHealth.Problem)services.Drivers.ProtectBackup(b,"全面扫描发现该设备仍异常，保留用于回退");else services.Drivers.TryReleasePendingRestartProtection(b,true,"Windows 已重启且全面扫描确认设备正常");}}SetStatus(driverScanResult.OfficialCheckWarning??$"驱动扫描完成 · {driverScanResult.Devices.Count:N0} 个设备 · {driverScanResult.UpgradeableCount:N0} 个可升级");
   }
+  catch(OperationCanceledException){SetStatus("驱动扫描已停止，未安装或修改任何驱动。");}
   finally
   {
+   driverScanCancellation?.Dispose();driverScanCancellation=null;
    Interlocked.Decrement(ref driverUiWorkflowCount);driverProgressBar=null;driverProgressText=null;driverStageText=null;driverProgressView=null;driverViewCache=null;if(currentPage=="driver")await TransitionContentAsync(()=>ShowDrivers(),false,true);TryFinishPendingClose();
   }
  }

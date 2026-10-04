@@ -31,7 +31,7 @@ public sealed partial class MainWindow
   repairRunButton.Click+=async(_,_)=>await Guard(RunRepairFromUi);
   var info=Ui.Columns(-1,-1,-1);Ui.Add(info,Ui.Card(Ui.Stack(12,Ui.Icon("\uE7F4",24),Ui.T("Windows 映像",17,true),Ui.T("Microsoft DISM + ImageHealthState",12,false,Ui.Muted)),new Thickness(20)),0);Ui.Add(info,Ui.Card(Ui.Stack(12,Ui.Icon("\uE73E",24),Ui.T("系统文件",17,true),Ui.T("Microsoft SFC + 二次验证",12,false,Ui.Muted)),new Thickness(20)),1);Ui.Add(info,Ui.Card(Ui.Stack(12,Ui.Icon("\uEDA2",24),Ui.T("磁盘文件系统",17,true),Ui.T("Microsoft CHKDSK 官方退出码",12,false,Ui.Muted)),new Thickness(20)),2);
   var advanced=new Expander{Header="高级选项 · 单独检查或修复",Content=repairSelector,HorizontalAlignment=HorizontalAlignment.Stretch};
-  repairViewCache=Ui.Stack(24,Heading("WINDOWS HEALTH","系统修复","一键检查、修复并复检；遇到无法自动处理的问题会明确说明下一步。"),info,Ui.GlassCard(Ui.Stack(16,description,repairRunButton,repairStatusText,repairBar,repairPercentText,repairResultBox,advanced)));
+  repairViewCache=Ui.Stack(24,Heading("WINDOWS HEALTH","系统修复","一键检查、修复并复检；遇到无法自动处理的问题会明确说明下一步。"),info,Ui.GlassCard(Ui.Stack(16,description,repairRunButton,repairStatusText,repairBar,repairPercentText,repairResultBox,advanced)),BuildMemoryPanel());
   pageHost.Content=repairViewCache;
  }
 

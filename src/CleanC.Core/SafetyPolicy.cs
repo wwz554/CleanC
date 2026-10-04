@@ -3,7 +3,7 @@ namespace CleanC.Core;
 public sealed record CleanupRule(string Id,string Root,string Label,TimeSpan MinimumAge,string[]? Extensions=null,string? NamePrefix=null);
 public sealed class SafetyPolicy
 {
- public const string Version="2026.10.03.172";
+ public const string Version="2026.10.04.173";
  readonly string[] systemReportRoots;
  readonly string cbsLogs;
  readonly string windows;
@@ -299,21 +299,25 @@ public sealed class SafetyPolicy
   var report=systemReportRoots.Any(root=>Within(path,root));
   var cbs=Within(path,cbsLogs);
   var dism=Within(path,Path.Combine(windows,@"Logs\DISM"));
+  var updateLogs=Path.Combine(windows,@"Logs\WindowsUpdate");
+  var update=Within(path,updateLogs);
   var kernelDump=Within(path,Path.Combine(windows,"Minidump"))||Within(path,Path.Combine(windows,"LiveKernelReports"))||
    path.Equals(Path.Combine(windows,"MEMORY.DMP"),StringComparison.OrdinalIgnoreCase);
   var crashpad=!protectedRoots.Any(root=>Within(path,root))&&appDataRoots.Any(root=>Within(path,root))&&
    System.Text.RegularExpressions.Regex.IsMatch(path,@"\\Crashpad\\(?:reports|pending|completed)\\[^\\]+\.dmp$",System.Text.RegularExpressions.RegexOptions.IgnoreCase|System.Text.RegularExpressions.RegexOptions.CultureInvariant);
-  if(!report&&!cbs&&!dism&&!kernelDump&&!crashpad)return false;
+  if(!report&&!cbs&&!dism&&!update&&!kernelDump&&!crashpad)return false;
   // Exact diagnostic formats only: never whitelist their entire parent or attachments.
   var name=Path.GetFileName(path);var ext=Path.GetExtension(path);
   var accepted=report?new[]{".wer",".dmp",".hdmp",".cab"}.Contains(ext,StringComparer.OrdinalIgnoreCase)
    :cbs?System.Text.RegularExpressions.Regex.IsMatch(name,@"^CbsPersist_\d+(?:_\d+)?\.(?:cab|log)$",System.Text.RegularExpressions.RegexOptions.IgnoreCase|System.Text.RegularExpressions.RegexOptions.CultureInvariant)
    :dism?name.Equals("dism.log.bak",StringComparison.OrdinalIgnoreCase)&&Path.GetDirectoryName(path)!.Equals(Path.Combine(windows,@"Logs\DISM"),StringComparison.OrdinalIgnoreCase)
+   :update?Path.GetDirectoryName(path)!.Equals(updateLogs,StringComparison.OrdinalIgnoreCase)&&
+    System.Text.RegularExpressions.Regex.IsMatch(name,@"^WindowsUpdate\.\d{8}\.\d{6}\.\d+\.\d+\.etl$",System.Text.RegularExpressions.RegexOptions.IgnoreCase|System.Text.RegularExpressions.RegexOptions.CultureInvariant)
    :ext.Equals(".dmp",StringComparison.OrdinalIgnoreCase);
   if(!accepted)return true;
   var age=TimeSpan.FromDays(crashpad?7:report||kernelDump?14:30);
-  var id=report?"system-wer":cbs?"system-cbs-archive":dism?"system-dism-archive":kernelDump?"system-kernel-dump":"app-crashpad";
-  var label=report?"旧错误报告":cbs?"Windows 已轮转组件日志":dism?"Windows 已轮转维护日志":kernelDump?"Windows 旧崩溃转储":"应用旧崩溃报告";
+  var id=report?"system-wer":cbs?"system-cbs-archive":dism?"system-dism-archive":update?"system-update-archive":kernelDump?"system-kernel-dump":"app-crashpad";
+  var label=report?"旧错误报告":cbs?"Windows 已轮转组件日志":dism?"Windows 已轮转维护日志":update?"Windows 旧更新诊断日志":kernelDump?"Windows 旧崩溃转储":"应用旧崩溃报告";
   result=new(snapshot is not null&&!IsRecent(snapshot,utcNow,age)?SafetyLevel.Safe:SafetyLevel.Optional,label,
    "仅清理明确诊断文件；保留近期报告、当前日志及不匹配的附件。删除后无法用该旧报告排障。",id);
   return true;

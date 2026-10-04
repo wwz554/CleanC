@@ -119,7 +119,7 @@ public sealed class DriverService(ICapabilityGate gate,AuditLog log)
     if(raw is null)return null;
     DriverUpdateCandidate? update=previous.Update;var officialCheckSucceeded=true;
     try{update=BestUpdate(raw,SearchOfficialDriverUpdates(token));}
-    catch(Exception e)when(e is InvalidOperationException or COMException or PlatformNotSupportedException)
+    catch(Exception e)when(e is InvalidOperationException or COMException or PlatformNotSupportedException or TimeoutException)
     {
      // Online verification is unknown, not "no update". Preserve the last known official candidate.
      log.Write("Drivers","VerifyOfficialUpdate","Unavailable",raw.DeviceId,e.Message);
@@ -314,11 +314,11 @@ public sealed class DriverService(ICapabilityGate gate,AuditLog log)
   token.ThrowIfCancellationRequested();
   progress?.Report(new(24,$"已识别 {local.Count:N0} 个硬件设备 · 正在检查官方驱动"));
   List<DriverUpdateCandidate> updates;string? warning=null;
-  try{updates=SearchOfficialDriverUpdates(token);}
-  catch(Exception e)when(e is InvalidOperationException or COMException or PlatformNotSupportedException)
+  try{updates=SearchOfficialDriverUpdates(token,progress);}
+  catch(Exception e)when(e is InvalidOperationException or COMException or PlatformNotSupportedException or TimeoutException)
   {
    updates=[];log.Write("Drivers","OfficialUpdateSearch","Unavailable",detail:e.Message);
-   warning="已完成本机检测，但未能检查官方更新。请检查网络与 Windows Update 服务后重新扫描；不能据此判断驱动已是最新。";
+   warning="本机检测已完成，官方在线检查未完成："+e.Message+" 不能据此判断驱动已是最新。";
    progress?.Report(new(58,$"已识别 {local.Count:N0} 个硬件设备 · 官方在线检查暂不可用"));
   }
   token.ThrowIfCancellationRequested();
@@ -458,14 +458,15 @@ $result=Get-CimInstance Win32_PnPEntity | Where-Object {
   finally{ReleaseCom(driverRows);ReleaseCom(pnpRows);ReleaseCom(service);ReleaseCom(locator);}
  }
 
- List<DriverUpdateCandidate> SearchOfficialDriverUpdates(CancellationToken token)
+ List<DriverUpdateCandidate> SearchOfficialDriverUpdates(CancellationToken token,IProgress<DriverProgress>? progress=null)
  {
   token.ThrowIfCancellationRequested();var sessionType=Type.GetTypeFromProgID("Microsoft.Update.Session")??throw new PlatformNotSupportedException("Windows Update Agent 不可用。");
   dynamic session=Activator.CreateInstance(sessionType)!;dynamic? searcher=null;object? result=null;
   try
   {
    session.ClientApplicationID="CleanC Driver Repair";searcher=session.CreateUpdateSearcher();searcher.Online=true;searcher.IncludePotentiallySupersededUpdates=false;
-   result=searcher.Search("IsInstalled=0 and Type='Driver' and IsHidden=0");dynamic r=result;var list=new List<DriverUpdateCandidate>();
+   result=WindowsUpdateSearch.Run((object)searcher,"IsInstalled=0 and Type='Driver' and IsHidden=0",token,
+    elapsed=>progress?.Report(new(24,$"正在检查官方驱动 · 已等待 {elapsed.TotalSeconds:0} 秒 / 最多 120 秒，可停止")));dynamic r=result;var list=new List<DriverUpdateCandidate>();
    if((int)r.ResultCode!=2)throw new InvalidOperationException($"官方驱动查询未完整成功（结果 {(int)r.ResultCode}），请重试。");
    for(var i=0;i<(int)r.Updates.Count;i++)
    {
@@ -654,7 +655,7 @@ $result=Get-CimInstance Win32_PnPEntity | Where-Object {
   {
    session.ClientApplicationID="CleanC Driver Repair";
    searcher=session.CreateUpdateSearcher();searcher.Online=true;
-   result=searcher.Search("IsInstalled=0 and Type='Driver' and IsHidden=0");
+   result=WindowsUpdateSearch.Run((object)searcher,"IsInstalled=0 and Type='Driver' and IsHidden=0",token);
    dynamic r=result;dynamic? target=null;
    if((int)r.ResultCode!=2)return new(false,"官方查询未完整成功，已停止下载，请重新扫描。",(int)r.ResultCode);
    for(var i=0;i<(int)r.Updates.Count;i++)
@@ -692,7 +693,7 @@ $result=Get-CimInstance Win32_PnPEntity | Where-Object {
   {
    session.ClientApplicationID="CleanC Driver Repair";
    searcher=session.CreateUpdateSearcher();searcher.Online=true;
-   result=searcher.Search("IsInstalled=0 and Type='Driver' and IsHidden=0");
+   result=WindowsUpdateSearch.Run((object)searcher,"IsInstalled=0 and Type='Driver' and IsHidden=0",token);
    dynamic r=result;dynamic? target=null;
    if((int)r.ResultCode!=2)return new(false,false,"官方查询未完整成功，已停止安装，请重新扫描。",(int)r.ResultCode);
    for(var i=0;i<(int)r.Updates.Count;i++)

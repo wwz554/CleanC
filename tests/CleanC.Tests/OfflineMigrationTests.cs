@@ -71,9 +71,11 @@ sealed partial class Tests
    File.WriteAllText(Path.Combine(dir,"upgrade-origin.json"),"{\"version\":\"1.7.2\",\"channel\":\"in-app\"}");
    Check(UpgradeOrigin.Read(dir,"1.7.2")==UpgradeChannel.InApp);
   });
-  await Test("16-character code alone cannot grant offline capability",async()=>{
-   var m=Manager(new FakeApi(this){Offline=true},new MemoryStore());var s=m.BeginOfflineActivation();var code=FixturePin(s,OfflineLease(true));
-   await Rejected(()=>m.CompleteOfflineActivationAsync(code));Throws(()=>m.Context.Demand(FeatureCapability.Cleanup));
+  await Test("Explicit code-only mode activates without file or network and survives restart",async()=>{
+   var st=new MemoryStore();var api=new FakeApi(this){Offline=true};var m=Manager(api,st);var s=m.BeginOfflineActivation();var code=FixturePin(s,OfflineLease(true));
+   await m.CompleteOfflineActivationAsync(code);m.Context.Demand(FeatureCapability.Cleanup);
+   Check(api.Paths.Count==0&&m.Context.State==LicenseState.Active&&st.Read<OfflineActivationRecord>("offline-license.dat")!.CodeOnly);
+   var restarted=Manager(api,st);await restarted.InitializeAsync();Check(restarted.Context.State==LicenseState.Active&&api.Paths.Count==0);
   });
   foreach(var permanent in new[]{false,true})
   await Test("Signed file and unchanged 16-character PIN activate without network "+permanent,async()=>{

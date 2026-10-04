@@ -15,12 +15,12 @@ public sealed class OfflineActivationSession : IDisposable
  public OfflineActivationSession(string deviceId,string devicePublicKey,DateTimeOffset now)
  {
   CreatedAt=DateTimeOffset.FromUnixTimeMilliseconds(now.ToUnixTimeMilliseconds());
-  var context=JsonSerializer.Serialize(new object[]{3,"CleanC",SessionId,deviceId,devicePublicKey,CreatedAt.ToUnixTimeMilliseconds()},new JsonSerializerOptions{Encoder=System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping});
+  var context=JsonSerializer.Serialize(new object[]{4,"CleanC",SessionId,deviceId,devicePublicKey,CreatedAt.ToUnixTimeMilliseconds()},new JsonSerializerOptions{Encoder=System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping});
   var clear=new byte[64];secret.CopyTo(clear,0);SHA256.HashData(Encoding.UTF8.GetBytes(context)).CopyTo(clear,32);
   using var resource=typeof(OfflineActivationSession).Assembly.GetManifestResourceStream("CleanC.Licensing.Crypto.offline-public.pem")??throw new CryptographicException("离线公钥缺失。");
   using var reader=new StreamReader(resource);using var rsa=RSA.Create();rsa.ImportFromPem(reader.ReadToEnd());
   var box=Base64(rsa.Encrypt(clear,RSAEncryptionPadding.OaepSHA256));CryptographicOperations.ZeroMemory(clear);
-  Request=Base64(JsonSerializer.SerializeToUtf8Bytes(new{v=3,app="CleanC",sessionId=SessionId,deviceId,devicePublicKey,createdAt=CreatedAt.ToUnixTimeMilliseconds(),box}));
+  Request=Base64(JsonSerializer.SerializeToUtf8Bytes(new{v=4,app="CleanC",sessionId=SessionId,deviceId,devicePublicKey,createdAt=CreatedAt.ToUnixTimeMilliseconds(),box}));
  }
  static string Base64(byte[] bytes)=>Convert.ToBase64String(bytes).TrimEnd('=').Replace('+','-').Replace('/','_');
  public static string Normalize(string code)=>new(code.ToUpperInvariant().Where(c=>!char.IsWhiteSpace(c)&&c!='-').Select(c=>c=='O'?'0':c is 'I' or 'L'?'1':c).ToArray());
@@ -44,4 +44,4 @@ public sealed class OfflineActivationSession : IDisposable
  }
  public void Dispose(){disposed=true;CryptographicOperations.ZeroMemory(secret);age.Stop();}
 }
-public sealed record OfflineActivationRecord(Lease Lease,CleanC.Core.LicenseState? Lock=null,SignedEnvelope? Envelope=null);
+public sealed record OfflineActivationRecord(Lease Lease,CleanC.Core.LicenseState? Lock=null,SignedEnvelope? Envelope=null,bool CodeOnly=false);

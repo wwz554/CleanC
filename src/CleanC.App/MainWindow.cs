@@ -188,107 +188,22 @@ public sealed partial class MainWindow : Window
   try
   {
    if(expectedVersion>=0&&expectedVersion!=navigationTransitionVersion)return;
-   if(!MotionEnabled()){render();return;}
-
-   const int fadeDurationMs=500;
-   const int layoutSettleMs=24;
-
-   var outgoingHost=pageHost;
-   var outgoingScroll=pageScroll;
-   var useB=ReferenceEquals(outgoingHost,pageHostA);
-   var incomingHost=useB?pageHostB:pageHostA;
-   var incomingScroll=useB?pageScrollB:pageScrollA;
-   if(outgoingScroll is null||incomingScroll is null){render();return;}
-
-   var previousOffset=preserveScroll?outgoingScroll.VerticalOffset:0d;
-   var outgoingVisual=ElementCompositionPreview.GetElementVisual(outgoingScroll);
-   var incomingVisual=ElementCompositionPreview.GetElementVisual(incomingScroll);
-
-   outgoingVisual.StopAnimation("Opacity");
-   incomingVisual.StopAnimation("Opacity");
-
-   // Pure crossfade: both pages remain at exactly the same position and scale.
-   outgoingVisual.Opacity=1f;
-   incomingVisual.Opacity=0f;
-   outgoingVisual.Offset=new Vector3(outgoingVisual.Offset.X,0,outgoingVisual.Offset.Z);
-   incomingVisual.Offset=new Vector3(incomingVisual.Offset.X,0,incomingVisual.Offset.Z);
-   outgoingVisual.Scale=Vector3.One;
-   incomingVisual.Scale=Vector3.One;
-
-   incomingHost.Content=null;
-   incomingScroll.Visibility=Visibility.Visible;
-   incomingScroll.IsHitTestVisible=false;
-   outgoingScroll.IsHitTestVisible=false;
-
-   pageHost=incomingHost;
-   pageScroll=incomingScroll;
-   try
-   {
-    // Build the next page behind the fully visible current page. The user never
-    // sees a blank/white intermediate frame while a heavier view is constructed.
-    render();
+   var offset=preserveScroll?pageScroll?.VerticalOffset??0:0;
+   // Cached XAML views have exactly one owner. Detach before rendering, in the
+   // same dispatcher turn; never attach a live cached view to two crossfade hosts.
+   pageHostA.Content=null;pageHostB.Content=null;
+   render();
+   if(pageScroll is not null){
+    pageScroll.Visibility=Visibility.Visible;pageScroll.IsHitTestVisible=true;
+    pageScroll.ChangeView(null,offset,null,true);
+    var other=ReferenceEquals(pageScroll,pageScrollA)?pageScrollB:pageScrollA;
+    if(other is not null){other.Visibility=Visibility.Collapsed;other.IsHitTestVisible=false;}
+    var visual=ElementCompositionPreview.GetElementVisual(pageScroll);visual.StopAnimation("Opacity");visual.Opacity=1;
+    if(MotionEnabled()){
+     var fade=visual.Compositor.CreateScalarKeyFrameAnimation();fade.Duration=TimeSpan.FromMilliseconds(150);
+     fade.InsertKeyFrame(0,.88f);fade.InsertKeyFrame(1,1);visual.StartAnimation("Opacity",fade);
+    }
    }
-   catch
-   {
-    pageHost=outgoingHost;pageScroll=outgoingScroll;
-    incomingHost.Content=null;
-    incomingScroll.Visibility=Visibility.Collapsed;
-    incomingScroll.IsHitTestVisible=false;
-    outgoingScroll.IsHitTestVisible=true;
-    incomingVisual.Opacity=1f;
-    throw;
-   }
-
-   incomingScroll.ChangeView(null,preserveScroll?previousOffset:0d,null,true);
-
-   // Allow one layout pass before revealing the new page. This is deliberately
-   // short and constant; the visible transition itself is always exactly 500 ms.
-   await Task.Delay(layoutSettleMs);
-
-   if(expectedVersion>=0&&expectedVersion!=navigationTransitionVersion)
-   {
-    incomingHost.Content=null;
-    incomingScroll.Visibility=Visibility.Collapsed;
-    incomingScroll.IsHitTestVisible=false;
-    pageHost=outgoingHost;pageScroll=outgoingScroll;
-    outgoingScroll.IsHitTestVisible=true;
-    return;
-   }
-
-   var compositor=incomingVisual.Compositor;
-   var ease=compositor.CreateCubicBezierEasingFunction(new Vector2(.25f,.10f),new Vector2(.25f,1f));
-
-   // Same timing/easing in opposite directions keeps perceived brightness stable:
-   // outgoing opacity + incoming opacity stays visually close to a constant mix.
-   var fadeIn=compositor.CreateScalarKeyFrameAnimation();
-   fadeIn.Duration=TimeSpan.FromMilliseconds(fadeDurationMs);
-   fadeIn.InsertKeyFrame(0,0f);
-   fadeIn.InsertKeyFrame(1,1f,ease);
-
-   var fadeOut=compositor.CreateScalarKeyFrameAnimation();
-   fadeOut.Duration=TimeSpan.FromMilliseconds(fadeDurationMs);
-   fadeOut.InsertKeyFrame(0,1f);
-   fadeOut.InsertKeyFrame(1,0f,ease);
-
-   incomingVisual.StartAnimation("Opacity",fadeIn);
-   outgoingVisual.StartAnimation("Opacity",fadeOut);
-
-   await Task.Delay(fadeDurationMs+20);
-
-   outgoingVisual.StopAnimation("Opacity");
-   incomingVisual.StopAnimation("Opacity");
-   outgoingVisual.Opacity=1f;
-   incomingVisual.Opacity=1f;
-   outgoingVisual.Offset=new Vector3(outgoingVisual.Offset.X,0,outgoingVisual.Offset.Z);
-   incomingVisual.Offset=new Vector3(incomingVisual.Offset.X,0,incomingVisual.Offset.Z);
-   outgoingVisual.Scale=Vector3.One;
-   incomingVisual.Scale=Vector3.One;
-
-   outgoingHost.Content=null;
-   outgoingScroll.Visibility=Visibility.Collapsed;
-   outgoingScroll.IsHitTestVisible=false;
-   incomingScroll.Visibility=Visibility.Visible;
-   incomingScroll.IsHitTestVisible=true;
   }
   finally{pageTransitionGate.Release();}
  }
@@ -305,6 +220,7 @@ public sealed partial class MainWindow : Window
  }
  void OnTimerTick()
  {
+  if(CleanupCacheBuildInProgress)UpdateCacheProgress();
   if(!initialized)return;
   UpdateLicenseDisplay();
   if(!tickBusy)_=RunLicenseMaintenanceAsync();
@@ -724,6 +640,11 @@ public sealed partial class MainWindow : Window
  Brush? activationShellBackground;
  void ShowActivation()
  {
+  if(!services.License.DeviceKeyAvailable){
+   pageHost.Content=Ui.Stack(20,Heading("DEVICE IDENTITY","原设备密钥不可用","原设备码和授权文件已保留，未生成新的设备身份。"),
+    Ui.GlassCard(Ui.Stack(12,Ui.T("需要恢复设备授权",20,true),Ui.T("可能发生了 TPM / 固件 / Windows 密钥存储变化。重新安装程序不会恢复丢失的私钥，请联系管理员恢复旧密钥，或明确解绑后重新激活。不要删除原授权目录。",13,false,Ui.Muted))));
+   return;
+  }
   activationShellBackground ??= shell.Background;
   shell.Background = Ui.B(Ui.Dark ? "131F2C" : "F4F7FB");
   if(pageScroll is not null)

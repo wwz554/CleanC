@@ -34,7 +34,7 @@ public sealed class LicenseContext(TrustedTimeService time) : ICapabilityGate
  LicenseState.DeviceMismatch=>"设备身份不匹配，请重新验证。",
  LicenseState.Suspended or LicenseState.Revoked=>"授权已停用或设备已解绑。",
  LicenseState.ServerUnavailable=>"授权服务暂时不可用，请连接网络后重试。",
- LicenseState.UpgradeRequired=>"旧离线授权需要升级凭证。请用原授权码在手机重新扫码领取签名文件，原到期时间不变。",
+ LicenseState.UpgradeRequired=>"旧离线授权需要升级验证。请用原授权码在手机重新扫码领取 16 位激活码，无需文件，原到期时间不变。",
  _=>"请输入授权码以激活 CleanC。"
  };
 }

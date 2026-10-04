@@ -14,6 +14,9 @@ internal sealed class DispatcherProgress<T> : IProgress<T>, IDisposable
  private readonly Action<T> handler;
  private readonly Action<Exception>? onError;
  private int stopped;
+ private readonly object progressLock=new();
+ private T latest=default!;
+ private bool pending;
 
  public DispatcherProgress(DispatcherQueue dispatcher,Action<T> handler,Action<Exception>? onError=null)
  {
@@ -25,16 +28,18 @@ internal sealed class DispatcherProgress<T> : IProgress<T>, IDisposable
  public void Report(T value)
  {
   if(Volatile.Read(ref stopped)!=0)return;
+  lock(progressLock){latest=value;if(pending)return;pending=true;}
   try
   {
    var queued=dispatcher.TryEnqueue(DispatcherQueuePriority.Low,()=>
    {
+    T current;lock(progressLock){current=latest;pending=false;}
     if(Volatile.Read(ref stopped)!=0)return;
-    try{handler(value);}catch(Exception e){SafeError(e);}
+    try{handler(current);}catch(Exception e){SafeError(e);}
    });
-   if(!queued)SafeError(new InvalidOperationException("UI dispatcher is shutting down."));
+   if(!queued){lock(progressLock)pending=false;SafeError(new InvalidOperationException("UI dispatcher is shutting down."));}
   }
-  catch(Exception e){SafeError(e);}
+  catch(Exception e){lock(progressLock)pending=false;SafeError(e);}
  }
 
  void SafeError(Exception e)
