@@ -13,6 +13,13 @@ namespace CleanC.Repair;
 
 public enum DriverHealth { Normal, UpdateAvailable, Problem, Missing }
 public sealed record DriverProgress(int Percent,string Stage);
+public sealed record DriverScanSnapshot(bool Running,DateTimeOffset StartedAt,DriverProgress Progress,DriverScanResult? LocalResult=null,DriverScanResult? CompletedResult=null,string? Error=null);
+public sealed record DriverInventory(string DeviceId,string Name,string DeviceClass,string Manufacturer,string Provider,string DriverVersion,DateTimeOffset? DriverDate,string HardwareId,IReadOnlyList<string> HardwareIds,IReadOnlyList<string> CompatibleIds,string InfName,bool IsSigned,int ProblemCode,string ProblemText);
+public interface IDriverScanHost
+{
+ IReadOnlyList<DriverInventory> ReadLocalDrivers(CancellationToken token);
+ IReadOnlyList<DriverUpdateCandidate> SearchUpdates(CancellationToken token,IProgress<DriverProgress>? progress);
+}
 public sealed record DriverUpdateCandidate(
  string UpdateId,string Title,string HardwareId,string Manufacturer,string Model,string Provider,string DriverClass,
  string Version,DateTimeOffset? DriverDate,bool RequiresRestart);
@@ -42,7 +49,7 @@ public sealed record DriverBackupInfo(
 public sealed record DriverBackupResult(bool Success,DriverBackupInfo? Backup,string Message,int ErrorCode);
 
 
-public sealed class DriverService(ICapabilityGate gate,AuditLog log)
+public sealed class DriverService(ICapabilityGate gate,AuditLog log,IDriverScanHost? scanHost=null)
 {
  const string BackupProtectionMarker="CleanC-backup-protected.flag";
  readonly SemaphoreSlim scanGate=new(1,1);
@@ -51,8 +58,13 @@ public sealed class DriverService(ICapabilityGate gate,AuditLog log)
  public bool IsRunning=>Volatile.Read(ref activeTasks)>0;
  public bool IsInstalling=>Volatile.Read(ref activeInstalls)>0;
  public bool IsScanning{get;private set;}
-
- sealed record RawDevice(string DeviceId,string Name,string DeviceClass,string Manufacturer,string Provider,string DriverVersion,DateTimeOffset? DriverDate,string HardwareId,IReadOnlyList<string> HardwareIds,IReadOnlyList<string> CompatibleIds,string InfName,bool IsSigned,int ProblemCode,string ProblemText);
+ readonly object scanStateLock=new();DriverScanSnapshot? scanState;
+ public DriverScanSnapshot? ScanState=>Volatile.Read(ref scanState);
+ void SetScanState(Func<DriverScanSnapshot,DriverScanSnapshot> update){lock(scanStateLock){if(scanState is not null)Volatile.Write(ref scanState,update(scanState));}}
+ sealed class ScanProgressSink(DriverService owner,IProgress<DriverProgress>? target):IProgress<DriverProgress>
+ {
+  public void Report(DriverProgress value){owner.SetScanState(s=>s with{Progress=value});target?.Report(value);}
+ }
 
  public async Task<DriverScanResult> ScanAsync(IProgress<DriverProgress>? progress=null,CancellationToken token=default)
  {
@@ -60,15 +72,17 @@ public sealed class DriverService(ICapabilityGate gate,AuditLog log)
   if(IsRunning)throw new InvalidOperationException("已有驱动任务正在运行。");
   if(!await scanGate.WaitAsync(0,token).ConfigureAwait(false))throw new InvalidOperationException("驱动全面扫描已经在运行。");
   Interlocked.Increment(ref activeTasks);IsScanning=true;var started=DateTimeOffset.UtcNow;
+  lock(scanStateLock)Volatile.Write(ref scanState,new(true,started,new(0,"正在读取本机硬件")));
   try
   {
    log.Write("Drivers","Scan","Started");
-   var result=await Task.Run(()=>ScanCore(started,progress,token),token).ConfigureAwait(false);
+   var result=await Task.Run(()=>ScanCore(started,new ScanProgressSink(this,progress),token),token).ConfigureAwait(false);
+   SetScanState(s=>s with{Running=false,CompletedResult=result,Progress=new(100,result.OfficialCheckSucceeded?"扫描完成":"本机检测完成 · 联网查询未完成")});
    log.Write("Drivers","Scan","Completed",detail:$"devices={result.Devices.Count}; updates={result.UpdateCount}; problems={result.ProblemCount}; unmatched={result.UnmatchedUpdateCount}");
    return result;
   }
-  catch(Exception e){log.Write("Drivers","Scan","Failed",detail:e.ToString());throw;}
-  finally{IsScanning=false;Interlocked.Decrement(ref activeTasks);scanGate.Release();}
+  catch(Exception e){SetScanState(s=>s with{Running=false,Error=e is OperationCanceledException?"扫描已停止":e.Message});log.Write("Drivers","Scan",e is OperationCanceledException?"Canceled":"Failed",detail:e.ToString());throw;}
+  finally{IsScanning=false;SetScanState(s=>s with{Running=false});Interlocked.Decrement(ref activeTasks);scanGate.Release();}
  }
 
  public async Task<DriverDownloadResult> DownloadAsync(string updateId,IProgress<DriverProgress>? progress=null,CancellationToken token=default)
@@ -310,24 +324,26 @@ public sealed class DriverService(ICapabilityGate gate,AuditLog log)
  DriverScanResult ScanCore(DateTimeOffset started,IProgress<DriverProgress>? progress,CancellationToken token)
  {
   progress?.Report(new(4,"正在读取本机硬件与已安装驱动"));
-  var local=ReadLocalDrivers(token);
+  var local=scanHost?.ReadLocalDrivers(token)??ReadLocalDrivers(token);
   token.ThrowIfCancellationRequested();
-  progress?.Report(new(24,$"已识别 {local.Count:N0} 个硬件设备 · 正在检查官方驱动"));
+  var localDevices=local.Select(item=>new DriverDevice(item.DeviceId,item.Name,item.DeviceClass,item.Manufacturer,item.Provider,item.DriverVersion,item.DriverDate,item.HardwareId,item.InfName,item.IsSigned,item.ProblemCode,item.ProblemText,null,null,false)).ToArray();
+  SetScanState(s=>s with{LocalResult=new(started,DateTimeOffset.UtcNow,localDevices,0,localDevices.Count(x=>x.ProblemCode!=0),0,false,"本机设备检测已完成；官方联网更新查询仍在后台进行，暂不能判断是否有可用更新。")});
+  progress?.Report(new(24,$"本机 {local.Count:N0} 个设备已检测 · 联网查询正在后台进行"));
   List<DriverUpdateCandidate> updates;string? warning=null;
-  try{updates=SearchOfficialDriverUpdates(token,progress);}
+  try{updates=(scanHost?.SearchUpdates(token,progress)??SearchOfficialDriverUpdates(token,progress)).ToList();}
+  catch(OperationCanceledException)when(token.IsCancellationRequested)
+  {updates=[];warning="已停止官方联网查询；保留已完成的本机设备检测，未安装任何驱动。";}
   catch(Exception e)when(e is InvalidOperationException or COMException or PlatformNotSupportedException or TimeoutException)
   {
    updates=[];log.Write("Drivers","OfficialUpdateSearch","Unavailable",detail:e.Message);
    warning="本机检测已完成，官方在线检查未完成："+e.Message+" 不能据此判断驱动已是最新。";
    progress?.Report(new(58,$"已识别 {local.Count:N0} 个硬件设备 · 官方在线检查暂不可用"));
   }
-  token.ThrowIfCancellationRequested();
   progress?.Report(new(74,"正在匹配硬件 ID、厂家与适用版本"));
 
   var used=new HashSet<string>(StringComparer.OrdinalIgnoreCase);var devices=new List<DriverDevice>(local.Count);
   foreach(var item in local)
   {
-   token.ThrowIfCancellationRequested();
    var update=BestUpdate(item,updates);
    if(update is not null)used.Add(update.UpdateId);
    devices.Add(new(item.DeviceId,item.Name,item.DeviceClass,item.Manufacturer,item.Provider,item.DriverVersion,item.DriverDate,item.HardwareId,item.InfName,item.IsSigned,item.ProblemCode,item.ProblemText,update,OfficialSupportUrl(item.Manufacturer,item.Provider),warning is null));
@@ -338,7 +354,7 @@ public sealed class DriverService(ICapabilityGate gate,AuditLog log)
   return new(started,DateTimeOffset.UtcNow,devices,updateCount,problemCount,unmatched,warning is null,warning);
  }
 
- List<RawDevice> ReadLocalDrivers(CancellationToken token)
+ List<DriverInventory> ReadLocalDrivers(CancellationToken token)
  {
   try
   {
@@ -353,7 +369,7 @@ public sealed class DriverService(ICapabilityGate gate,AuditLog log)
   throw new InvalidOperationException("没有枚举到任何 PnP 硬件。请确认 Windows Management Instrumentation (WMI) 服务正常后重试。");
  }
 
- List<RawDevice> ReadLocalDriversPowerShell(CancellationToken token)
+ List<DriverInventory> ReadLocalDriversPowerShell(CancellationToken token)
  {
   const string script="""
 $ErrorActionPreference='Stop'
@@ -399,7 +415,7 @@ $result=Get-CimInstance Win32_PnPEntity | Where-Object {
   if(process.ExitCode!=0)throw new InvalidOperationException(string.IsNullOrWhiteSpace(stderr)?"PowerShell 硬件枚举失败。":stderr.Trim());
   if(string.IsNullOrWhiteSpace(json)||json.Trim()=="[]")return [];
   using var doc=JsonDocument.Parse(json);
-  var list=new List<RawDevice>();
+  var list=new List<DriverInventory>();
   foreach(var e in doc.RootElement.EnumerateArray())
   {
    token.ThrowIfCancellationRequested();
@@ -421,7 +437,7 @@ $result=Get-CimInstance Win32_PnPEntity | Where-Object {
   return list;
  }
 
- List<RawDevice> ReadLocalDriversWmi(CancellationToken token)
+ List<DriverInventory> ReadLocalDriversWmi(CancellationToken token)
  {
   var locatorType=Type.GetTypeFromProgID("WbemScripting.SWbemLocator")??throw new PlatformNotSupportedException("Windows WMI 服务不可用。");
   dynamic locator=Activator.CreateInstance(locatorType)!;dynamic? service=null;object? driverRows=null;object? pnpRows=null;
@@ -434,7 +450,7 @@ $result=Get-CimInstance Win32_PnPEntity | Where-Object {
    {
     token.ThrowIfCancellationRequested();dynamic d=raw;var id=SafeString(()=>d.DeviceID);if(string.IsNullOrWhiteSpace(id))continue;var code=SafeInt(()=>d.ConfigManagerErrorCode);var hids=SafeStrings(()=>d.HardwareID);var cids=SafeStrings(()=>d.CompatibleID);var primary=hids.FirstOrDefault()??"";problems[id]=(code,ProblemText(code),SafeString(()=>d.Name),SafeString(()=>d.PNPClass),SafeString(()=>d.Manufacturer),primary,hids,cids);
    }
-   var list=new List<RawDevice>();var seen=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+   var list=new List<DriverInventory>();var seen=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
    driverRows=service.ExecQuery("SELECT DeviceID,DeviceName,DriverVersion,DriverDate,DriverProviderName,Manufacturer,IsSigned,InfName,DeviceClass,HardWareID FROM Win32_PnPSignedDriver");
    foreach(var raw in (IEnumerable)driverRows)
    {
@@ -812,7 +828,7 @@ $result=Get-CimInstance Win32_PnPEntity | Where-Object {
   }
  }
 
- static DriverUpdateCandidate? BestUpdate(RawDevice device,IReadOnlyList<DriverUpdateCandidate> updates)
+ static DriverUpdateCandidate? BestUpdate(DriverInventory device,IReadOnlyList<DriverUpdateCandidate> updates)
  {
   // Windows driver matching is identifier based. Device display names are never an eligibility signal.
   var hardware=new HashSet<string>(device.HardwareIds.Select(NormalizeHardware).Where(x=>!string.IsNullOrWhiteSpace(x)),StringComparer.OrdinalIgnoreCase);

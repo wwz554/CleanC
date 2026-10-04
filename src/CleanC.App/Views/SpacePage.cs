@@ -5,6 +5,16 @@ namespace CleanC.App;
 public sealed partial class MainWindow
 {
  readonly object spaceCacheLock=new();readonly Dictionary<string,List<DirectoryStat>> spaceCache=new(StringComparer.OrdinalIgnoreCase);readonly Dictionary<string,UIElement> spaceViewCache=new(StringComparer.OrdinalIgnoreCase);UIElement? spaceScanningView;string spaceCurrentPath="";
+ void TrimSpaceCachesLocked()
+ {
+  // Browsing cannot keep an unbounded number of 250-row XAML trees alive.
+  foreach(var key in spaceViewCache.Keys.Where(p=>!p.Equals(spaceCurrentPath,StringComparison.OrdinalIgnoreCase)&&!p.Equals(vm.ScanRoot,StringComparison.OrdinalIgnoreCase)).ToArray()){
+   if(spaceViewCache.Count<=6)break;spaceViewCache.Remove(key);
+  }
+  foreach(var key in spaceCache.Keys.Where(p=>!p.Equals(spaceCurrentPath,StringComparison.OrdinalIgnoreCase)&&!p.Equals(vm.ScanRoot,StringComparison.OrdinalIgnoreCase)).ToArray()){
+   if(spaceCache.Count<=64)break;spaceCache.Remove(key);
+  }
+ }
  void ClearSpaceCache(){lock(spaceCacheLock){spaceCache.Clear();spaceViewCache.Clear();spaceScanningView=null;}}
  async Task WarmSpaceRootAsync()
  {
@@ -45,7 +55,7 @@ public sealed partial class MainWindow
   Interlocked.Increment(ref transientDatabaseReaders);
   try
   {
-   var children=await Task.Run(()=>services.Database.Children(path));lock(spaceCacheLock)spaceCache[path]=children;
+   var children=await Task.Run(()=>services.Database.Children(path));lock(spaceCacheLock){spaceCache[path]=children;TrimSpaceCachesLocked();}
    if(currentPage=="space"&&string.Equals(spaceCurrentPath,path,StringComparison.OrdinalIgnoreCase))await TransitionContentAsync(()=>RenderSpace(path,children),true,true);
   }
   catch(Exception e){services.Log.Write("Space","Load","Failed",path,e.ToString());if(currentPage=="space")SetStatus("空间分析加载失败："+e.Message);}
@@ -72,7 +82,7 @@ public sealed partial class MainWindow
   body.Add(Ui.Card(map,new Thickness(16)));
   body.Add(Ui.Card(Ui.Stack(8,Ui.T("目录与文件 · 按逻辑大小排序",14,true),Ui.T("显示当前目录最大的 250 项；图中显示其中最大的 40 项。🔒 表示受保护内容，仅允许查看。",11,false,Ui.Muted),list),new Thickness(16)));
   var view=Ui.Stack(20,body.ToArray());
-  lock(spaceCacheLock)spaceViewCache[path]=view;pageHost.Content=view;
+  lock(spaceCacheLock){spaceViewCache[path]=view;TrimSpaceCachesLocked();}pageHost.Content=view;
  }
  async Task FileDetails(string path)
  {

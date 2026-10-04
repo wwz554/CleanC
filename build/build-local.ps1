@@ -16,7 +16,7 @@ Push-Location $root
 
 try {
     Write-Host "========================================"
-    Write-Host " CleanC build script 1.7.3"
+    Write-Host " CleanC build script 1.7.4"
     Write-Host "========================================"
 
     if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
